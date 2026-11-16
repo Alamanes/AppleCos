@@ -1,17 +1,25 @@
-import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  Agent,
+  type AgentMessage,
+  type AgentOptions,
+  type AgentTool,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import {
   createModels,
   createProvider,
   type Api,
   type Model,
   type SimpleStreamOptions,
+  type ThinkingLevel,
+  type ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { fetch as goFetch } from "@mygo-plugins/fetch";
 
-import { Settings } from "./mygo";
+import type { Config } from "./mygo";
 
 /** Wire family: Anthropic messages, or one of the two OpenAI APIs. */
 export type Wire = "openai" | "anthropic";
@@ -29,12 +37,22 @@ export interface Endpoint {
 export interface AgentHandle {
   agent: Agent;
   endpoint: Endpoint;
+  model: Model<Api>;
 }
 
-const SYSTEM_PROMPT = [
-  "你是 AppleCos 的角色扮演引擎，运行在用户自己的 Mac 上。",
-  "用简体中文回答，保持角色设定与沉浸感，不要解释你自己的实现细节。",
-].join("\n");
+/** Everything the page hands to a new agent; nothing is re-read from disk. */
+export interface AgentInput {
+  config: Config;
+  /** Seed transcript. The world engine replaces the system message per request. */
+  messages?: AgentMessage[];
+  tools?: AgentTool<any>[];
+  /** Leading system prompt; the world engine overwrites it each turn. */
+  systemPrompt?: string;
+  transformContext?: AgentOptions["transformContext"];
+  beforeToolCall?: AgentOptions["beforeToolCall"];
+  /** Reply cap; derived from the model's context window when omitted. */
+  maxTokens?: number;
+}
 
 /** Zero cost keeps the transcript view free of made-up prices for custom endpoints. */
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -92,6 +110,12 @@ export function normalize(config: {
   };
 }
 
+/** Keeps a numeric budget inside a sane range. */
+function clamp(value: number, low: number, high: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(high, Math.max(low, value));
+}
+
 /** Which pi-ai implementation answers this endpoint. */
 function apiFor(endpoint: Endpoint): { id: Api; streams: ReturnType<typeof openAICompletionsApi> } {
   if (endpoint.kind === "anthropic") {
@@ -103,30 +127,85 @@ function apiFor(endpoint: Endpoint): { id: Api; streams: ReturnType<typeof openA
   return { id: "openai-completions", streams: openAICompletionsApi() };
 }
 
+/** Thinking budget as the config stores it; "off" asks for no reasoning at all. */
+export type ReasoningLevel = "off" | "low" | "medium" | "high";
+
+/** Reads Config.reasoning, treating anything unrecognized as "off". */
+export function reasoningLevel(config: { reasoning?: string }): ReasoningLevel {
+  switch (config.reasoning) {
+    case "low":
+    case "medium":
+    case "high":
+      return config.reasoning;
+    default:
+      return "off";
+  }
+}
+
+/** Level pi-ai accepts; its union has no "off", an omitted field means no reasoning. */
+function wireReasoning(level: ReasoningLevel): ThinkingLevel | undefined {
+  return level === "off" ? undefined : level;
+}
+
+/**
+ * Effort names a custom endpoint receives. pi-ai sends each mapped value as the
+ * endpoint's native effort string: reasoning_effort on the OpenAI-compatible
+ * wires, effort on Anthropic. "off" and "minimal" are null so a disabled
+ * request sends no effort value instead of guessing one. Medium maps to the
+ * middle tier; an endpoint whose model only exposes low/high gets the nearest
+ * lower tier, so point that entry at "low" for such a server.
+ */
+const thinkingMap: ThinkingLevelMap = {
+  off: null,
+  minimal: null,
+  low: "low",
+  medium: "medium",
+  high: "high",
+};
+
 /** Builds the model descriptor pi-ai needs for a user-supplied endpoint. */
-function modelFor(endpoint: Endpoint, api: Api): Model<Api> {
+function modelFor(
+  endpoint: Endpoint,
+  api: Api,
+  contextWindow: number,
+  maxTokens: number,
+  level: ReasoningLevel,
+): Model<Api> {
   const model = {
     id: endpoint.model,
     name: endpoint.model,
     api,
     provider: "custom",
     baseUrl: endpoint.baseUrl,
-    reasoning: false,
+    // A disabled level turns off the whole reasoning path on the wire.
+    reasoning: level !== "off",
+    thinkingLevelMap: thinkingMap,
     input: ["text"],
     cost: zeroCost,
-    contextWindow: 128000,
-    maxTokens: 8192,
+    // Cache lifetime in seconds per retention tier: 5 minutes ephemeral, 1 hour
+    // extended. pi only reads this for its cache-warming policy; whether the
+    // endpoint really caches is up to the server.
+    promptCache: { short: 300, long: 3600 },
+    contextWindow,
+    maxTokens,
   };
   return model as unknown as Model<Api>;
 }
 
 /** Creates the Pi agent for any OpenAI- or Anthropic-compatible endpoint. */
-export async function createAgent(): Promise<AgentHandle> {
-  const config = await Settings.load();
-  const endpoint = normalize(config);
+export async function createAgent(input: AgentInput): Promise<AgentHandle> {
+  const endpoint = normalize(input.config);
   if (!endpoint.baseUrl) throw new Error("还没有填写接口地址");
   if (!endpoint.model) throw new Error("还没有填写模型名");
-  const systemPrompt = (config.prompt ?? "").trim() || SYSTEM_PROMPT;
+
+  const level = reasoningLevel(input.config);
+  const contextWindow = clamp(input.config.contextWindow, 2048, 2_000_000, 32_000);
+  const maxTokens = clamp(
+    input.maxTokens ?? Math.floor(contextWindow / 3),
+    512,
+    Math.min(8192, contextWindow),
+    4096,
+  );
 
   // Requests leave from Go, so no CORS and any header is allowed.
   const { id: apiId, streams } = apiFor(endpoint);
@@ -136,7 +215,7 @@ export async function createAgent(): Promise<AgentHandle> {
     baseUrl: endpoint.baseUrl,
     // The key travels as a per-request option; this resolve only satisfies the contract.
     auth: { apiKey: { name: "API key", resolve: async () => ({ auth: {} }) } },
-    models: [modelFor(endpoint, apiId)],
+    models: [modelFor(endpoint, apiId, contextWindow, maxTokens, level)],
     api: streams,
   });
 
@@ -148,14 +227,31 @@ export async function createAgent(): Promise<AgentHandle> {
   const streamFn: StreamFn = (requestModel, context, options) =>
     models.streamSimple(requestModel, context, {
       ...options,
+      // streamSimple takes the pi level directly; "off" stays undefined.
+      reasoning: wireReasoning(level),
+      maxTokens,
+      // Ask for prompt caching. pi writes Anthropic-style cache_control on the
+      // anthropic-messages wire, and adds a prompt_cache_key only for
+      // api.openai.com; other OpenAI-compatible servers cache the byte-identical
+      // prefix on their own, so the stable prefix does the work there.
+      cacheRetention: "short",
       apiKey: endpoint.apiKey,
       fetch: goFetch as unknown as NonNullable<SimpleStreamOptions["fetch"]>,
     });
 
   const agent = new Agent({
-    initialState: { systemPrompt, model },
+    initialState: {
+      systemPrompt: input.systemPrompt ?? "",
+      messages: input.messages ?? [],
+      model,
+      // The agent loop forwards this level to every request as its reasoning.
+      thinkingLevel: level,
+      tools: input.tools ?? [],
+    },
     streamFn,
+    transformContext: input.transformContext,
+    beforeToolCall: input.beforeToolCall,
   });
 
-  return { agent, endpoint };
+  return { agent, endpoint, model };
 }

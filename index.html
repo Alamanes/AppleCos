@@ -1,9 +1,41 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="nocturne" data-theme-choice="system" data-flag-dev="off">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>AppleCos</title>
+    <script>
+      // Resolve the saved theme and flags before the stylesheet loads, so the
+      // first paint is already the user's palette instead of a white flash.
+      (function () {
+        var root = document.documentElement;
+        try {
+          var saved = JSON.parse(localStorage.getItem("applecos.theme") || "null");
+          var choice = (saved && saved.choice) || "system";
+          var palettes = ["nocturne", "atlas", "terminal", "press", "ember", "xuanzhi", "dawn", "moss"];
+          var lightPalettes = ["press", "xuanzhi", "dawn", "moss"];
+          if (choice === "system") {
+            choice = window.matchMedia("(prefers-color-scheme: dark)").matches ? "nocturne" : "press";
+          } else if (palettes.indexOf(choice) === -1) {
+            choice = "nocturne";
+          }
+          root.dataset.theme = choice;
+          root.dataset.themeChoice =
+            saved && saved.choice && (saved.choice === "system" || palettes.indexOf(saved.choice) !== -1)
+              ? saved.choice
+              : "system";
+          var flags = JSON.parse(localStorage.getItem("applecos.flags") || "{}");
+          root.dataset.flagDev = flags.devMode ? "on" : "off";
+          root.dataset.flagScript = flags.scriptMode === false ? "off" : "on";
+          root.dataset.flagWorld = flags.worldPanel === false ? "off" : "on";
+          root.dataset.flagClock = flags.worldClock === false ? "off" : "on";
+          root.dataset.flagMotion = flags.reduceMotion ? "on" : "off";
+          root.style.colorScheme = lightPalettes.indexOf(choice) === -1 ? "dark" : "light";
+        } catch (error) {
+          root.dataset.theme = "nocturne";
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
@@ -14,65 +46,682 @@
           <span class="tag">本地剧场</span>
         </div>
 
-        <button type="button" id="toggle-rail" class="rail-toggle" aria-label="收起侧栏">
+        <div class="godbanner" id="godbanner" role="status">
+          <span class="godbanner-dot" aria-hidden="true"></span>
+          <span>神域 · 开发者模式：提示词注入、原始事件与工具参数全部可见</span>
+          <button type="button" class="godbanner-dismiss" id="godbanner-dismiss">收起</button>
+        </div>
+
+        <button
+          type="button"
+          id="toggle-rail"
+          class="rail-toggle"
+          aria-label="收起侧栏"
+          aria-expanded="true"
+          aria-controls="rail"
+        >
           <span class="icon" data-icon="caret-right"></span>
         </button>
+
+        <div id="empty" class="empty" data-visible="true" aria-hidden="true">
+          <span class="moon">
+            <span class="icon" data-icon="moon-stars"></span>
+          </span>
+          <p class="empty-title">还没有开场</p>
+          <p class="empty-hint">在下方写下第一句台词，回车就开演。</p>
+        </div>
 
         <div id="chat" class="script" aria-live="polite"></div>
 
         <form id="composer" class="composer">
           <div class="box">
-            <textarea id="input" class="composer-input" rows="1" placeholder="递一句台词" autofocus></textarea>
+            <textarea
+              id="input"
+              class="composer-input"
+              rows="1"
+              placeholder="写一句台词"
+              autofocus
+            ></textarea>
             <button type="button" id="send" class="send" data-mode="idle" aria-label="发送" disabled>
               <span class="icon icon-arrow" data-icon="arrow-up"></span>
               <span class="icon icon-stop" data-icon="square"></span>
             </button>
           </div>
+          <p class="hint" aria-hidden="true">回车发送　Shift 回车换行</p>
         </form>
       </main>
 
-      <aside class="rail" id="rail">
-        <div class="rail-block">
-          <span class="rail-label">模型</span>
-          <span id="endpoint" class="rail-value">未设置模型</span>
-          <span id="status" class="rail-status" data-state="idle">待机</span>
+      <aside class="rail" id="rail" aria-label="侧栏">
+        <!-- Drag strip over the traffic lights; keeps the rail padding intact. -->
+        <div class="rail-drag" aria-hidden="true"></div>
+        <div class="rail-body">
+          <!-- 1. World crown and world clock -->
+          <section class="rail-group rail-crown">
+            <div class="world-crown">
+              <span class="world-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="8.5" />
+                  <path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2" />
+                  <path d="M12 7.5l1.6 3.2 3.4.5-2.5 2.4.6 3.4-3.1-1.7-3.1 1.7.6-3.4L7 11.2l3.4-.5z" />
+                </svg>
+              </span>
+              <div class="world-id">
+                <h1 class="world-name" id="world-name">未载入世界</h1>
+                <p class="world-sub" id="world-sub">在设置里写一张世界设定</p>
+              </div>
+              <button type="button" class="world-switch" id="open-worlds" aria-label="切换或新建世界">
+                切换
+              </button>
+            </div>
+
+            <button
+              type="button"
+              class="world-clock"
+              id="world-clock"
+              aria-expanded="false"
+              aria-controls="clock-panel"
+            >
+              <span class="clock-day" id="clock-day">第 1 日</span>
+              <span class="clock-time" id="clock-time">00:00</span>
+              <span class="clock-caret" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+              </span>
+            </button>
+            <div class="clock-panel" id="clock-panel" hidden>
+              <button type="button" data-advance="60">+1 时</button>
+              <button type="button" data-advance="360">+6 时</button>
+              <button type="button" data-advance="0" data-phase="dusk">黄昏</button>
+              <button type="button" data-advance="0" data-phase="night">入夜</button>
+            </div>
+          </section>
+
+          <!-- 2. Rail tabs: scenes / world / cast / memory -->
+          <div class="rail-tabs" id="rail-tabs" role="tablist" aria-label="侧栏分区">
+            <button
+              type="button"
+              class="rail-tab"
+              id="rail-tab-scenes"
+              role="tab"
+              data-rail-tab="scenes"
+              aria-selected="true"
+              aria-controls="rail-pane-scenes"
+              tabindex="0"
+            >
+              场次
+            </button>
+            <button
+              type="button"
+              class="rail-tab"
+              id="rail-tab-world"
+              role="tab"
+              data-rail-tab="world"
+              aria-selected="false"
+              aria-controls="rail-pane-world"
+              tabindex="-1"
+            >
+              世界
+            </button>
+            <button
+              type="button"
+              class="rail-tab"
+              id="rail-tab-cast"
+              role="tab"
+              data-rail-tab="cast"
+              aria-selected="false"
+              aria-controls="rail-pane-cast"
+              tabindex="-1"
+            >
+              角色
+            </button>
+            <button
+              type="button"
+              class="rail-tab"
+              id="rail-tab-memory"
+              role="tab"
+              data-rail-tab="memory"
+              aria-selected="false"
+              aria-controls="rail-pane-memory"
+              tabindex="-1"
+            >
+              记忆
+            </button>
+          </div>
+
+          <!-- 3. Panes: one visible tab body at a time -->
+          <div class="rail-panes" id="rail-panes">
+            <section
+              class="rail-pane rail-sessions"
+              id="rail-pane-scenes"
+              role="tabpanel"
+              aria-labelledby="rail-tab-scenes"
+              data-rail-pane="scenes"
+            >
+              <header class="rail-head">
+                <h2 class="rail-label">场次</h2>
+                <button type="button" class="rail-icon-button" id="new-session" aria-label="新建场次">＋</button>
+              </header>
+              <ol class="session-list" id="session-list" aria-label="场次列表"></ol>
+              <p class="session-empty" id="session-empty">还没有场次，点右上角 ＋ 开场。</p>
+            </section>
+
+            <section
+              class="rail-pane rail-world"
+              id="rail-pane-world"
+              role="tabpanel"
+              aria-labelledby="rail-tab-world"
+              data-rail-pane="world"
+              hidden
+            >
+              <div class="rail-group" id="world-panel" aria-label="世界状态">
+                <h2 class="rail-label">世界状态</h2>
+                <p class="world-row">
+                  <span class="world-key">地点</span>
+                  <span class="world-value" id="world-place">—</span>
+                </p>
+                <p class="world-row">
+                  <span class="world-key">天色</span>
+                  <span class="world-value" id="world-weather">—</span>
+                </p>
+                <p class="world-row">
+                  <span class="world-key">世界书</span>
+                  <span class="world-value" id="world-lore">未命中</span>
+                </p>
+              </div>
+
+              <div class="rail-commands" aria-label="世界编辑">
+                <button type="button" class="rail-command" id="open-world">
+                  <span class="rail-command-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="8" />
+                      <path d="M4 12h16" />
+                      <path d="M12 4c2.6 2.5 2.6 13.5 0 16M12 4c-2.6 2.5-2.6 13.5 0 16" />
+                    </svg>
+                  </span>
+                  <span class="rail-command-text">
+                    <span class="rail-command-title">世界设定</span>
+                    <span class="rail-command-sub">设定、场景与开场</span>
+                  </span>
+                </button>
+                <button type="button" class="rail-command" id="rail-open-lore">
+                  <span class="rail-command-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H20v16H5.5A1.5 1.5 0 0 1 4 18.5z" />
+                      <path d="M8 8h8M8 12h8M8 16h5" />
+                    </svg>
+                  </span>
+                  <span class="rail-command-text">
+                    <span class="rail-command-title">世界书</span>
+                    <span class="rail-command-sub">条目、触发与投放</span>
+                  </span>
+                </button>
+                <button type="button" class="rail-command" id="rail-open-character">
+                  <span class="rail-command-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <circle cx="9" cy="9" r="3.2" />
+                      <path d="M3.5 19a5.5 5.5 0 0 1 11 0" />
+                      <path d="M16 7.2a3 3 0 0 1 0 5.6M17.5 19a5 5 0 0 0-2-4" />
+                    </svg>
+                  </span>
+                  <span class="rail-command-text">
+                    <span class="rail-command-title">角色库</span>
+                    <span class="rail-command-sub">卡面、口吻与底线</span>
+                  </span>
+                </button>
+                <button type="button" class="rail-command" id="rail-open-memory">
+                  <span class="rail-command-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M12 4.5A3.5 3.5 0 0 0 8.5 8c0 .6-.5 1-1 1.2A3 3 0 0 0 6 15.4V16a3 3 0 0 0 3 3h1.5A1.5 1.5 0 0 0 12 17.5z" />
+                      <path d="M12 4.5A3.5 3.5 0 0 1 15.5 8c0 .6.5 1 1 1.2A3 3 0 0 1 18 15.4V16a3 3 0 0 1-3 3h-1.5A1.5 1.5 0 0 1 12 17.5z" />
+                    </svg>
+                  </span>
+                  <span class="rail-command-text">
+                    <span class="rail-command-title">记忆库</span>
+                    <span class="rail-command-sub">长期事实与关系</span>
+                  </span>
+                </button>
+              </div>
+            </section>
+
+            <section
+              class="rail-pane rail-cast"
+              id="rail-pane-cast"
+              role="tabpanel"
+              aria-labelledby="rail-tab-cast"
+              data-rail-pane="cast"
+              hidden
+            >
+              <header class="rail-head">
+                <h2 class="rail-label">出场角色</h2>
+              </header>
+              <button type="button" class="rail-command" id="rail-open-player">
+                <span class="rail-command-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <circle cx="12" cy="8.6" r="3.4" />
+                    <path d="M5.5 19a6.5 6.5 0 0 1 13 0" />
+                  </svg>
+                </span>
+                <span class="rail-command-text">
+                  <span class="rail-command-title">我的角色</span>
+                  <span class="rail-command-sub" id="rail-player-name">玩家</span>
+                </span>
+              </button>
+              <div class="world-cast" id="world-cast"></div>
+              <p class="rail-note" id="cast-empty">这场戏还没有角色加入。</p>
+            </section>
+
+            <section
+              class="rail-pane rail-memory"
+              id="rail-pane-memory"
+              role="tabpanel"
+              aria-labelledby="rail-tab-memory"
+              data-rail-pane="memory"
+              hidden
+            >
+              <header class="rail-head">
+                <h2 class="rail-label">最近记忆</h2>
+              </header>
+              <div class="rail-memory-body" id="rail-memory-list"></div>
+              <p class="rail-note" id="rail-memory-empty">还没有记忆。</p>
+              <button type="button" class="rail-command" id="rail-memory-open">
+                <span class="rail-command-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24">
+                    <path d="M12 4.5A3.5 3.5 0 0 0 8.5 8c0 .6-.5 1-1 1.2A3 3 0 0 0 6 15.4V16a3 3 0 0 0 3 3h1.5A1.5 1.5 0 0 0 12 17.5z" />
+                    <path d="M12 4.5A3.5 3.5 0 0 1 15.5 8c0 .6.5 1 1 1.2A3 3 0 0 1 18 15.4V16a3 3 0 0 1-3 3h-1.5A1.5 1.5 0 0 1 12 17.5z" />
+                  </svg>
+                </span>
+                <span class="rail-command-text">
+                  <span class="rail-command-title">记忆库</span>
+                  <span class="rail-command-sub">全部事实与关系</span>
+                </span>
+              </button>
+            </section>
+          </div>
         </div>
 
-        <div class="rail-block">
-          <button type="button" id="open-settings" class="primary rail-button">
-            <span class="icon" data-icon="gear"></span>
-            设置
-          </button>
+        <!-- 4. Footer: model, settings, exit -->
+        <div class="rail-foot">
+          <div class="rail-model-row">
+            <p class="rail-status" id="status" data-state="idle">待机</p>
+            <button
+              type="button"
+              id="rail-stats-toggle"
+              class="rail-stats-toggle"
+              aria-expanded="false"
+              aria-controls="rail-stats-panel"
+            >
+              用量
+            </button>
+          </div>
+          <div class="rail-stats-panel" id="rail-stats-panel" role="group" aria-label="本场用量" hidden></div>
+          <div class="rail-actions">
+            <button type="button" id="open-settings" class="rail-action">
+              <span class="icon" data-icon="gear"></span>
+              设置
+            </button>
+            <button type="button" id="quit-app" class="rail-action rail-action-quit" aria-label="退出 AppleCos">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+                <path d="M12 4v8" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" />
+                <path
+                  d="M7.5 6.5a8 8 0 1 0 9 0"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  fill="none"
+                  stroke-linecap="round"
+                />
+              </svg>
+              退出
+            </button>
+          </div>
+          <div class="quit-confirm" id="quit-confirm" hidden>
+            <p id="quit-note">退出 AppleCos？</p>
+            <div>
+              <button type="button" data-quit="cancel">取消</button>
+              <button type="button" data-quit="yes" class="primary">退出</button>
+            </div>
+          </div>
         </div>
       </aside>
+
+      <div class="rail-scrim" id="rail-scrim" aria-hidden="true"></div>
     </div>
 
+    <!-- Settings -->
     <dialog id="settings" class="sheet">
       <div class="settings">
-        <nav class="settings-nav">
-          <button type="button" class="nav-item" data-pane="general">通用</button>
+        <nav class="settings-nav" aria-label="设置分类">
+          <button type="button" class="nav-item" data-pane="appearance">外观</button>
+          <button type="button" class="nav-item" data-pane="world">世界</button>
           <button type="button" class="nav-item" data-pane="model">模型</button>
-          <button type="button" class="nav-item" data-pane="persona">个性化</button>
+          <button type="button" class="nav-item" data-pane="persona">人格</button>
           <button type="button" class="nav-item" data-pane="about">关于</button>
         </nav>
 
         <div class="settings-body">
           <header class="settings-head">
-            <h2 id="pane-title">通用</h2>
-            <button type="button" class="ghost" id="close-settings">完成</button>
+            <h2 id="pane-title">外观</h2>
+            <button type="button" class="close-button" id="close-settings" aria-label="关闭设置">
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
           </header>
 
           <div class="panes">
-            <section class="pane" data-pane="general">
-              <p class="pane-note">外观默认跟随系统，也可以固定成习惯的那一种。</p>
-              <div class="theme-row">
-                <button type="button" class="theme-option" data-theme="system">跟随系统</button>
-                <button type="button" class="theme-option" data-theme="light">浅色</button>
-                <button type="button" class="theme-option" data-theme="dark">深色</button>
+            <section class="pane" data-pane="appearance">
+              <p class="pane-note">主题是一整套配色与字体，不只是明暗。跟随系统会在浅色与深色之间自动换挡。</p>
+              <div class="theme-grid" id="theme-grid">
+                <button type="button" class="theme-card" data-theme-choice="system">
+                  <span class="theme-swatch" style="--s1: #171b2e; --s2: #eef1f7; --s3: #6d67ce" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">跟随系统</span>
+                    <span class="theme-card-scheme">自动</span>
+                  </span>
+                  <span class="theme-card-mood">浅色用铅字，深色用夜场。</span>
+                  <span class="theme-card-note" id="system-theme-note">当前：夜场</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="nocturne">
+                  <span class="theme-swatch" style="--s1: #0e111a; --s2: #1b2030; --s3: #8e88e8" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">夜场</span>
+                    <span class="theme-card-scheme">深色</span>
+                  </span>
+                  <span class="theme-card-mood">冷蓝幕布与一束紫光，衬线台词像台本。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="atlas">
+                  <span class="theme-swatch" style="--s1: #05131a; --s2: #0e2029; --s3: #c9a227" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">星图</span>
+                    <span class="theme-card-scheme">深色</span>
+                  </span>
+                  <span class="theme-card-mood">深墨海图与黄铜金，经纬网格铺在幕后。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="terminal">
+                  <span class="theme-swatch" style="--s1: #060907; --s2: #101512; --s3: #6fe38b" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">舰桥</span>
+                    <span class="theme-card-scheme">深色</span>
+                  </span>
+                  <span class="theme-card-mood">磷光绿终端，等宽字与方块光标。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="press">
+                  <span class="theme-swatch" style="--s1: #21231f; --s2: #fafaf7; --s3: #b5342a" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">铅字</span>
+                    <span class="theme-card-scheme">浅色</span>
+                  </span>
+                  <span class="theme-card-mood">冷灰纸与朱红印章，双线分隔。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="ember">
+                  <span class="theme-swatch" style="--s1: #120c09; --s2: #241812; --s3: #e8963f" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">篝火</span>
+                    <span class="theme-card-scheme">深色</span>
+                  </span>
+                  <span class="theme-card-mood">焦褐夜色与琥珀火光，圆角与暖光。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="xuanzhi">
+                  <span class="theme-swatch" style="--s1: #2a241c; --s2: #fffdf7; --s3: #8b4a1d" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">宣纸</span>
+                    <span class="theme-card-scheme">浅色</span>
+                  </span>
+                  <span class="theme-card-mood">暖白纸面与极淡纤维纹，墨字配赭石印。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="dawn">
+                  <span class="theme-swatch" style="--s1: #1b2a44; --s2: #ffffff; --s3: #1d63d8" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">晨雾</span>
+                    <span class="theme-card-scheme">浅色</span>
+                  </span>
+                  <span class="theme-card-mood">冷白薄雾、深靛正文与晴空蓝强调，阴影柔和。</span>
+                </button>
+                <button type="button" class="theme-card" data-theme-choice="moss">
+                  <span class="theme-swatch" style="--s1: #2b3527; --s2: #fafcf6; --s3: #4d6b38" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                  <span class="theme-card-head">
+                    <span class="theme-card-name">苔痕</span>
+                    <span class="theme-card-scheme">浅色</span>
+                  </span>
+                  <span class="theme-card-mood">浅灰绿纸与墨绿正文，苔绿强调，边角收得小。</span>
+                </button>
+              </div>
+
+              <h3 class="section-title">界面 <span>立即生效</span></h3>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">世界状态面板</p>
+                  <p class="switch-hint">在侧栏显示地点、在场角色与世界书命中。</p>
+                </div>
+                <button type="button" class="switch" id="flag-world" role="switch" aria-checked="true" aria-label="世界状态面板"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">世界钟与场次</p>
+                  <p class="switch-hint">抬头显示世界内时间，场次条目带场次编号。</p>
+                </div>
+                <button type="button" class="switch" id="flag-clock" role="switch" aria-checked="true" aria-label="世界钟与场次"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">台本排版</p>
+                  <p class="switch-hint">角色台词用衬线字与左侧竖线；关掉退回普通对话。</p>
+                </div>
+                <button type="button" class="switch" id="flag-script" role="switch" aria-checked="true" aria-label="台本排版"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">打字机流式</p>
+                  <p class="switch-hint">逐字出现；关掉则在整段到达时一次落地。</p>
+                </div>
+                <button type="button" class="switch" id="flag-typewriter" role="switch" aria-checked="true" aria-label="打字机流式"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">自动命名场次</p>
+                  <p class="switch-hint">用第一句台词概括这一场的标题。</p>
+                </div>
+                <button type="button" class="switch" id="flag-autotitle" role="switch" aria-checked="true" aria-label="自动命名场次"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">减少动效</p>
+                  <p class="switch-hint">关闭转场与光标呼吸，仅保留状态变化。</p>
+                </div>
+                <button type="button" class="switch" id="flag-motion" role="switch" aria-checked="false" aria-label="减少动效"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">显示请求耗时</p>
+                  <p class="switch-hint">在状态胶囊里附带本次回复的毫秒数。</p>
+                </div>
+                <button type="button" class="switch" id="flag-latency" role="switch" aria-checked="false" aria-label="显示请求耗时"></button>
+              </div>
+            </section>
+
+            <section class="pane" data-pane="world">
+              <p class="pane-note">世界书、记忆与工具决定模型能看见什么。所有条目只存在这台 Mac 上。</p>
+
+              <h3 class="section-title">设定库</h3>
+
+              <div class="library-row">
+                <span class="library-count" id="world-count">0</span>
+                <div class="library-text">
+                  <p class="library-name">世界</p>
+                  <p class="library-hint">时代的基调、地点与规则</p>
+                </div>
+                <div class="library-actions">
+                  <button type="button" class="ghost" id="open-world-library">编辑</button>
+                </div>
+              </div>
+
+              <div class="library-row">
+                <span class="library-count" id="player-count">1</span>
+                <div class="library-text">
+                  <p class="library-name">玩家角色</p>
+                  <p class="library-hint" id="player-name">当前：玩家</p>
+                </div>
+                <div class="library-actions">
+                  <button type="button" class="ghost" id="open-player-library">编辑</button>
+                </div>
+              </div>
+
+              <div class="library-row">
+                <span class="library-count" id="character-count">0</span>
+                <div class="library-text">
+                  <p class="library-name">角色卡</p>
+                  <p class="library-hint">在场角色的身份、口吻与关系</p>
+                </div>
+                <div class="library-actions">
+                  <button type="button" class="ghost" id="open-character-library">编辑</button>
+                </div>
+              </div>
+
+              <div class="library-row">
+                <span class="library-count" id="lore-count">0</span>
+                <div class="library-text">
+                  <p class="library-name">世界书</p>
+                  <p class="library-hint">按关键词命中的设定条目</p>
+                </div>
+                <div class="library-actions">
+                  <button type="button" class="ghost" id="open-lore-library">编辑</button>
+                </div>
+              </div>
+
+              <div class="library-row">
+                <span class="library-count" id="memory-count">0</span>
+                <div class="library-text">
+                  <p class="library-name">记忆</p>
+                  <p class="library-hint">跨场次保留的事实与关系</p>
+                </div>
+                <div class="library-actions">
+                  <button type="button" class="ghost" id="open-memory-library">编辑</button>
+                </div>
+              </div>
+
+              <h3 class="section-title">内容 <span>进入上下文的材料</span></h3>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">世界书触发</p>
+                  <p class="switch-hint">台词命中关键词时，把对应条目拼进提示词。</p>
+                </div>
+                <button type="button" class="switch" id="flag-worldbook" role="switch" aria-checked="true" aria-label="世界书触发"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">长期记忆</p>
+                  <p class="switch-hint">跨场次保留事实与关系，并按预算注入。</p>
+                </div>
+                <button type="button" class="switch" id="flag-memory" role="switch" aria-checked="true" aria-label="长期记忆"></button>
+              </div>
+
+              <h3 class="section-title">工具 <span>给模型的权限</span></h3>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">骰子</p>
+                  <p class="switch-hint">让模型进行检定与随机判定，结果会写进场记。</p>
+                </div>
+                <button type="button" class="switch" id="tool-dice" role="switch" aria-checked="true" aria-label="骰子工具"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">时间推进</p>
+                  <p class="switch-hint">模型可以推进世界钟，切换白天与夜晚。</p>
+                </div>
+                <button type="button" class="switch" id="tool-time" role="switch" aria-checked="true" aria-label="时间推进工具"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">场景查询</p>
+                  <p class="switch-hint">模型可以读取当前地点、在场角色与关系。</p>
+                </div>
+                <button type="button" class="switch" id="tool-scene" role="switch" aria-checked="true" aria-label="场景查询工具"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">世界书检索</p>
+                  <p class="switch-hint">模型可以主动检索世界书条目。</p>
+                </div>
+                <button type="button" class="switch" id="tool-lore" role="switch" aria-checked="true" aria-label="世界书检索工具"></button>
+              </div>
+
+              <h3 class="section-title">开发者模式</h3>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">神域</p>
+                  <p class="switch-hint">在舞台上方显示横幅，并让提示词注入与原始工具参数可见。</p>
+                </div>
+                <button type="button" class="switch" id="flag-dev" role="switch" aria-checked="false" aria-label="开发者模式"></button>
+              </div>
+
+              <div class="switch-row">
+                <div class="switch-text">
+                  <p class="switch-title">危险操作前确认</p>
+                  <p class="switch-hint">丢弃对话、删除角色卡与覆盖文件前先问一次。</p>
+                </div>
+                <button type="button" class="switch" id="flag-confirm" role="switch" aria-checked="true" aria-label="危险操作前确认"></button>
+              </div>
+
+              <h3 class="section-title">预算 <span>超出时先丢最早的记忆</span></h3>
+
+              <div class="budget-row">
+                <div class="budget-text">
+                  <p class="budget-label">上下文预算</p>
+                  <p class="budget-hint">每次请求最多带多少 token 的历史。</p>
+                </div>
+                <input class="field budget-input" id="budget-context" type="number" min="2000" max="200000" step="1000" inputmode="numeric" />
+                <span class="budget-unit">token</span>
+              </div>
+
+              <div class="budget-row">
+                <div class="budget-text">
+                  <p class="budget-label">世界书预算</p>
+                  <p class="budget-hint">允许世界书与记忆占用上下文的比例。</p>
+                </div>
+                <input class="field budget-input" id="budget-pct" type="number" min="0" max="50" step="1" inputmode="numeric" />
+                <span class="budget-unit">%</span>
+              </div>
+
+              <div class="budget-row">
+                <div class="budget-text">
+                  <p class="budget-label">单次触发上限</p>
+                  <p class="budget-hint">一次扫描最多注入多少 token 的设定。</p>
+                </div>
+                <input class="field budget-input" id="budget-trigger" type="number" min="0" max="16000" step="100" inputmode="numeric" />
+                <span class="budget-unit">token</span>
               </div>
             </section>
 
             <section class="pane" data-pane="model">
+              <p class="pane-note">改完立刻生效：下一次发送就用新端点，不需要保存或重启。</p>
               <div class="wire" id="wire" data-wire="openai">
                 <span class="wire-thumb" aria-hidden="true"></span>
                 <button type="button" class="wire-option" data-wire="anthropic">
@@ -113,15 +762,27 @@
                 <button type="button" class="ghost" id="fetch-models">获取列表</button>
               </div>
 
+              <label class="field-label reasoning-row">
+                思考强度
+                <select id="reasoning" class="field">
+                  <option value="off">关闭</option>
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </label>
+
               <ul id="model-list" class="model-list"></ul>
               <p id="model-status" class="model-status"></p>
+              <p class="settings-hint">思考强度依据端点能力映射；关闭可降低延迟与消耗。</p>
+              <p class="settings-hint">端点、模型或思考强度改动后，下一次发送会重建会话内核；正在生成的内容会先停止。</p>
             </section>
 
             <section class="pane" data-pane="persona">
-              <p class="pane-note">留空则使用内置的角色扮演提示词，填了就整段替换它。</p>
+              <p class="pane-note">留空则使用内置的角色扮演提示词，填了就整段替换它。停下输入就会保存。</p>
               <label class="field-label">
                 系统提示词
-                <textarea id="prompt" class="field" rows="8" spellcheck="false"></textarea>
+                <textarea id="prompt" class="field" rows="10" spellcheck="false"></textarea>
               </label>
               <button type="button" class="ghost" id="reset-prompt">恢复默认</button>
             </section>
@@ -134,13 +795,87 @@
                 <dd>MyGO · Go 单二进制 + 系统 WebView</dd>
                 <dt>内核</dt>
                 <dd>Pi · pi-ai / pi-agent-core 1.5.2</dd>
+                <dt>主题</dt>
+                <dd id="about-theme">夜场</dd>
+                <dt>数据</dt>
+                <dd>~/Library/Application Support/AppleCos</dd>
               </dl>
+              <p class="settings-hint">世界书、记忆与界面偏好存在本机；退出后下次启动原样恢复。</p>
+              <button type="button" class="ghost" id="about-quit">退出 AppleCos</button>
             </section>
           </div>
 
-          <footer class="settings-foot">
-            <button type="button" id="save-settings" class="primary">保存并重启</button>
+          <footer class="settings-foot save-state" id="save-state" data-state="idle" aria-live="polite">
+            所有改动即时保存
           </footer>
+        </div>
+      </div>
+    </dialog>
+
+    <!-- Editor: world / character / lore / memory -->
+    <dialog id="editor" class="sheet editor">
+      <div class="editor-shell">
+        <header class="editor-head">
+          <span class="editor-kind" id="editor-kind">世界</span>
+          <h2 class="editor-title" id="editor-title">新建</h2>
+          <div class="editor-actions">
+            <button type="button" class="icon-button" id="editor-close" aria-label="关闭编辑器">
+              <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="editor-body">
+          <section class="lore-manager" id="lore-manager" hidden aria-label="世界书条目管理器">
+            <div class="lore-book-settings" id="lore-book-settings"></div>
+            <div class="lore-toolbar" id="lore-toolbar"></div>
+            <div
+              class="lore-rows"
+              id="lore-rows"
+              role="listbox"
+              aria-label="世界书条目"
+              aria-multiselectable="true"
+              tabindex="0"
+            ></div>
+            <div class="lore-detail" id="lore-detail" aria-label="条目详情"></div>
+            <div class="lore-bulkbar" id="lore-bulkbar" aria-label="批量操作"></div>
+          </section>
+          <form class="editor-form" id="editor-form" novalidate></form>
+          <aside class="editor-preview" aria-label="注入预览">
+            <div class="editor-preview-head">
+              <span>注入预览</span>
+              <span id="editor-preview-meta">随输入更新</span>
+            </div>
+            <pre class="inject-preview" id="inject-preview"></pre>
+          </aside>
+        </div>
+
+        <footer class="editor-foot">
+          <button type="button" class="ghost danger-ghost" id="editor-delete">删除</button>
+          <span class="editor-status" id="editor-status" role="status"></span>
+          <span class="spacer"></span>
+          <button type="button" class="ghost" id="editor-back">返回</button>
+          <button type="button" class="primary" id="editor-save">保存并返回</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <dialog id="worlds" class="sheet worlds">
+      <div class="worlds-shell">
+        <header class="worlds-head">
+          <span class="editor-kind">资料库</span>
+          <h2 class="worlds-title" id="worlds-title">世界</h2>
+          <button type="button" class="icon-button" id="worlds-close" aria-label="关闭世界列表">
+            <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </header>
+
+        <ul class="world-list" id="world-list" aria-label="世界列表"></ul>
+        <p class="worlds-status" id="worlds-status" role="status"></p>
+
+        <div class="worlds-new">
+          <input id="world-new-name" class="field" placeholder="新世界的名字" autocomplete="off" spellcheck="false" />
+          <button type="button" class="ghost" id="world-new">新建世界</button>
         </div>
       </div>
     </dialog>

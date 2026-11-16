@@ -5,8 +5,34 @@ import { call } from "mygo-runtime";
 // ---- Types ----
 
 /**
+ * Artifact is one entry in the library: a world, a character card or a
+ * lorebook. Contents stay raw JSON, because the page owns their schema.
+ */
+export interface Artifact {
+  id: string;
+  name: string;
+  kind: string;
+  detail?: string;
+  bytes: number;
+  updatedAt: string;
+}
+
+/** CardSummary describes an imported character card for the library list. */
+export interface CardSummary {
+  id: string;
+  name: string;
+  spec: string;
+  specVersion: string;
+  source: string;
+  hasBook: boolean;
+  bytes: number;
+  updatedAt: string;
+}
+
+/**
  * Config is what the app keeps between launches. It describes one endpoint,
- * so the app can talk to any OpenAI- or Anthropic-compatible service.
+ * so the app can talk to any OpenAI- or Anthropic-compatible service, plus the
+ * budgets the story engine reads.
  */
 export interface Config {
   /** Kind is the wire protocol: "openai" or "anthropic". */
@@ -22,10 +48,71 @@ export interface Config {
   model: string;
   /** APIKey is stored on disk only, readable by the user alone. */
   apiKey?: string;
-  /** Theme is "system", "light" or "dark". */
+  /** Theme is "system", "nocturne", "atlas", "terminal", "press" or "ember". */
   theme: string;
   /** Prompt replaces the built-in system prompt when it is not empty. */
   prompt?: string;
+  /** Reasoning is the thinking budget: "off", "low", "medium" or "high". */
+  reasoning: string;
+  /**
+   * ContextWindow is the model's context size in tokens, used for history
+   * trimming and world info budgets.
+   */
+  contextWindow: number;
+  /** BudgetPct is the share of the context world info may use. */
+  budgetPct: number;
+  /** TriggerBudget caps the tokens one world info scan may insert. */
+  triggerBudget: number;
+  /** Confirm asks before actions that discard a conversation or a card. */
+  confirm: boolean;
+  /** Features toggles optional interface parts. */
+  features: Features;
+}
+
+/**
+ * Features toggles optional parts of the interface, so a saved layout keeps
+ * working when a panel is hidden later.
+ */
+export interface Features {
+  /** WorldPanel shows the world sidebar. */
+  worldPanel: boolean;
+  /** WorldClock shows the in-world date and time. */
+  worldClock: boolean;
+  /** ScriptMode renders the transcript as a script. */
+  scriptMode: boolean;
+  /** Typewriter reveals replies while they stream. */
+  typewriter: boolean;
+  /** AutoTitle names a conversation from its first exchange. */
+  autoTitle: boolean;
+  /** ReduceMotion turns off decorative animation. */
+  reduceMotion: boolean;
+  /** ShowLatency shows how long a reply took. */
+  showLatency: boolean;
+  /** Worldbook enables world info triggers. */
+  worldbook: boolean;
+  /** Memory enables long-term memory. */
+  memory: boolean;
+  /** Tools lets the model call the memory tools. */
+  tools: boolean;
+  /** DeveloperMode shows trigger logs and raw payloads. */
+  developerMode: boolean;
+}
+
+/** SessionData is everything the page needs to reopen a conversation. */
+export interface SessionData {
+  summary: SessionSummary;
+  state: string;
+  messages: string[];
+}
+
+/** SessionSummary is one conversation as the sidebar lists it. */
+export interface SessionSummary {
+  id: string;
+  title: string;
+  worldId: string;
+  messages: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Services ----
@@ -35,7 +122,10 @@ export interface Config {
  * into typed TypeScript functions in src/mygo.ts.
  */
 export const Settings = {
-  /** Load returns the saved configuration, or the defaults when none is saved. */
+  /**
+   * Load returns the saved configuration, or the defaults when none is saved.
+   * Older files predate fields here, so missing values keep their defaults.
+   */
   load(): Promise<Config> {
     return call("Settings.Load");
   },
@@ -45,5 +135,174 @@ export const Settings = {
    */
   save(cfg: Config): Promise<void> {
     return call("Settings.Save", cfg);
+  },
+} as const;
+
+/**
+ * Library stores worlds, character cards and lorebooks in the app's data
+ * directory. Every method takes or returns raw JSON strings, so the page can
+ * change its schema without touching this file.
+ */
+export const Library = {
+  /** DeleteCard moves a card to the app's Trash folder. */
+  deleteCard(id: string): Promise<void> {
+    return call("Library.DeleteCard", id);
+  },
+  /** DeleteLorebook moves a world book to the app's Trash folder. */
+  deleteLorebook(id: string): Promise<void> {
+    return call("Library.DeleteLorebook", id);
+  },
+  /** DeleteWorld moves a world to the app's Trash folder. */
+  deleteWorld(id: string): Promise<void> {
+    return call("Library.DeleteWorld", id);
+  },
+  /**
+   * ExportCard shows a save panel and writes the card as V3 JSON. A cancelled
+   * panel returns an empty path with a nil error.
+   */
+  exportCard(id: string): Promise<string> {
+    return call("Library.ExportCard", id);
+  },
+  /** ExportCardTo writes the card as V3 JSON at path, without a save panel. */
+  exportCardTo(id: string, path: string): Promise<string> {
+    return call("Library.ExportCardTo", id, path);
+  },
+  /**
+   * ExportLorebook shows a save panel and writes the stored world book JSON.
+   * A cancelled panel returns an empty path with a nil error.
+   */
+  exportLorebook(id: string): Promise<string> {
+    return call("Library.ExportLorebook", id);
+  },
+  /**
+   * ExportWorld shows a save panel and writes the stored world JSON.
+   * A cancelled panel returns an empty path with a nil error.
+   */
+  exportWorld(id: string): Promise<string> {
+    return call("Library.ExportWorld", id);
+  },
+  /**
+   * ImportCard shows a file picker and stores the chosen JSON, PNG or CHARX
+   * card. A cancelled picker returns a zero summary with a nil error.
+   */
+  importCard(): Promise<CardSummary> {
+    return call("Library.ImportCard");
+  },
+  /** ImportCardFile imports a card from a path, without a file picker. */
+  importCardFile(path: string): Promise<CardSummary> {
+    return call("Library.ImportCardFile", path);
+  },
+  /**
+   * ImportLorebook shows a file picker and stores a SillyTavern world book.
+   * A cancelled picker returns a zero artifact with a nil error.
+   */
+  importLorebook(): Promise<Artifact> {
+    return call("Library.ImportLorebook");
+  },
+  /** ImportLorebookFile imports a world book from a path, without a file picker. */
+  importLorebookFile(path: string): Promise<Artifact> {
+    return call("Library.ImportLorebookFile", path);
+  },
+  /** ListCards returns the character cards on disk, newest first. */
+  listCards(): Promise<Artifact[]> {
+    return call("Library.ListCards");
+  },
+  /** ListLorebooks returns the world books on disk, newest first. */
+  listLorebooks(): Promise<Artifact[]> {
+    return call("Library.ListLorebooks");
+  },
+  /** ListWorlds returns the worlds on disk, newest first. */
+  listWorlds(): Promise<Artifact[]> {
+    return call("Library.ListWorlds");
+  },
+  /** LoadCard returns one card's JSON, always in the V3 shape. */
+  loadCard(id: string): Promise<string> {
+    return call("Library.LoadCard", id);
+  },
+  /** LoadLorebook returns one world book's JSON, in the format it was saved in. */
+  loadLorebook(id: string): Promise<string> {
+    return call("Library.LoadLorebook", id);
+  },
+  /** LoadWorld returns one world's JSON. */
+  loadWorld(id: string): Promise<string> {
+    return call("Library.LoadWorld", id);
+  },
+  /** LorebookArtifact returns the list entry for one stored world book. */
+  lorebookArtifact(id: string): Promise<Artifact> {
+    return call("Library.LorebookArtifact", id);
+  },
+  /** SaveCard normalizes a card to V3, writes it, and returns its id. */
+  saveCard(id: string, raw: string): Promise<string> {
+    return call("Library.SaveCard", id, raw);
+  },
+  /** SaveLorebook writes a world book and returns the id it was stored under. */
+  saveLorebook(id: string, raw: string): Promise<string> {
+    return call("Library.SaveLorebook", id, raw);
+  },
+  /**
+   * SaveTextFile shows a save panel and writes UTF-8 text, such as a hand-picked
+   * set of world book entries. A cancelled panel returns an empty path.
+   */
+  saveTextFile(defaultName: string, content: string): Promise<string> {
+    return call("Library.SaveTextFile", defaultName, content);
+  },
+  /**
+   * SaveWorld writes a world and returns the id it was stored under. An empty
+   * id derives one from the JSON, or generates a fresh one.
+   */
+  saveWorld(id: string, raw: string): Promise<string> {
+    return call("Library.SaveWorld", id, raw);
+  },
+} as const;
+
+/**
+ * Sessions stores conversations. session.json holds the mutable state the
+ * page defines (world, memory, overlay, world info timers); messages.jsonl
+ * holds one raw JSON message per line, so appending a turn never rewrites the
+ * transcript.
+ */
+export const Sessions = {
+  /** AppendMessage adds one message line to the transcript. */
+  appendMessage(id: string, raw: string): Promise<void> {
+    return call("Sessions.AppendMessage", id, raw);
+  },
+  /** Create starts an empty conversation and returns its summary. */
+  create(worldID: string, title: string): Promise<SessionSummary> {
+    return call("Sessions.Create", worldID, title);
+  },
+  /** Delete moves a conversation to the app's Trash folder. */
+  delete(id: string): Promise<void> {
+    return call("Sessions.Delete", id);
+  },
+  /** List returns every conversation, most recently updated first. */
+  list(): Promise<SessionSummary[]> {
+    return call("Sessions.List");
+  },
+  /** Load returns a conversation's state and transcript. */
+  load(id: string): Promise<SessionData> {
+    return call("Sessions.Load", id);
+  },
+  /** ReplaceMessages rewrites the whole transcript, for edits and rewinds. */
+  replaceMessages(id: string, messages: string[]): Promise<SessionSummary> {
+    return call("Sessions.ReplaceMessages", id, messages);
+  },
+  /** SaveState replaces session.json with the page's current state. */
+  saveState(id: string, raw: string): Promise<SessionSummary> {
+    return call("Sessions.SaveState", id, raw);
+  },
+} as const;
+
+/** Shell exposes window and application lifecycle to the page. */
+export const Shell = {
+  /** Quit closes every window and exits the app. */
+  quit(): Promise<void> {
+    return call("Shell.Quit");
+  },
+  /**
+   * SetWindowBackground sets the color painted behind the page, in the syntax
+   * of the window options, such as "light-dark(#f5f7fb, #12151f)".
+   */
+  setWindowBackground(color: string): Promise<void> {
+    return call("Shell.SetWindowBackground", color);
   },
 } as const;

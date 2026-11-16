@@ -2,7 +2,7 @@ import { defineConfig } from "mygo-cli";
 
 export default defineConfig({
   name: "AppleCos",
-  identifier: "com.orangerin.applecos",
+  identifier: "com.alamanes.applecos",
   version: "0.1.0",
   // `mygo dev` runs devCommand and loads devUrl; `mygo build` runs
   // buildCommand and embeds frontendDist into the app.
