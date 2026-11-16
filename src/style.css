@@ -383,6 +383,7 @@ dialog[open] {
   padding: 4px;
   border: 1px solid var(--line);
   border-radius: 999px;
+  margin-bottom: 1.15rem;
 }
 
 .wire-thumb {
