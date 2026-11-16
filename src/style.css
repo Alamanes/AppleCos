@@ -3,18 +3,22 @@
   color-scheme: dark;
   --ink: #0c0d0b;
   --board: #14160f;
+  --surface: #191b13;
   --paper: #e9e3d3;
   --muted: #8c8778;
   --copper: #c4633f;
-  --line: color-mix(in srgb, var(--muted) 28%, transparent);
+  --line: color-mix(in srgb, var(--muted) 26%, transparent);
   --serif: "Songti SC", "Iowan Old Style", Palatino, Georgia, serif;
   --sans: system-ui, -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+  --ease-out: cubic-bezier(0.22, 0.9, 0.28, 1);
+  --ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
   --ink: #f2ede1;
   --board: #fbf7ee;
+  --surface: #ffffff;
   --paper: #16150f;
   --muted: #6f6a5c;
   --copper: #a84f30;
@@ -25,6 +29,7 @@
     color-scheme: light;
     --ink: #f2ede1;
     --board: #fbf7ee;
+    --surface: #ffffff;
     --paper: #16150f;
     --muted: #6f6a5c;
     --copper: #a84f30;
@@ -42,10 +47,8 @@ body {
 
 body {
   margin: 0;
-  display: flex;
-  flex-direction: column;
   background:
-    radial-gradient(120% 80% at 50% -20%, color-mix(in srgb, var(--copper) 9%, transparent), transparent 62%),
+    radial-gradient(90% 60% at 50% -25%, color-mix(in srgb, var(--copper) 10%, transparent), transparent 62%),
     var(--ink);
   color: var(--paper);
   font-family: var(--sans);
@@ -53,80 +56,85 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Masthead reads like a playbill: name, then the small print. */
-.masthead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1.05rem 1.6rem 0.85rem;
-  border-bottom: 1px solid var(--line);
+/* Layout: a stage and a rail that slides out of the way. */
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.brand {
+.stage {
+  position: relative;
   display: flex;
-  align-items: baseline;
-  gap: 0.7rem;
+  flex-direction: column;
+  min-width: 0;
 }
 
-.brand-name {
+/* A floating wordmark instead of a native title bar. */
+.titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 20px 0 92px;
+  pointer-events: none;
+  -webkit-app-region: drag;
+  --app-region: drag;
+}
+
+.wordmark {
   font-family: var(--serif);
-  font-size: 1.3rem;
+  font-size: 1.26rem;
   letter-spacing: 0.01em;
 }
 
-.brand-tag {
-  font-size: 0.7rem;
+.tag {
+  font-size: 0.68rem;
   letter-spacing: 0.2em;
   color: var(--muted);
 }
 
-.controls {
-  display: flex;
-  align-items: center;
-  gap: 0.9rem;
-  font-size: 0.75rem;
-  color: var(--muted);
-}
-
-.endpoint {
-  font-variant-numeric: tabular-nums;
-}
-
-.lamp {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-
-.lamp::before {
-  content: "";
-  width: 6px;
-  height: 6px;
+.rail-toggle {
+  position: absolute;
+  top: 13px;
+  right: 16px;
+  z-index: 4;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
   border-radius: 50%;
-  background: var(--muted);
+  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  color: var(--muted);
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: transform 240ms var(--ease-bounce), color 180ms ease;
 }
 
-.lamp[data-state="busy"] {
-  color: var(--copper);
+.rail-toggle:hover {
+  color: var(--paper);
 }
 
-.lamp[data-state="busy"]::before {
-  background: var(--copper);
-  animation: pulse 1.5s ease-in-out infinite;
+.app[data-rail="closed"] .rail-toggle {
+  transform: rotate(180deg);
 }
 
-/* The transcript: one narrow column, like lines on a page. */
+/* Transcript */
 .script {
   flex: 1;
   overflow-y: auto;
-  padding: 2.2rem 1.6rem 1.2rem;
+  padding: 70px 34px 18px;
 }
 
 .line {
-  max-width: 64ch;
-  margin: 0 auto 1.9rem;
-  animation: rise 260ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+  max-width: 66ch;
+  margin: 0 auto 1.85rem;
+  animation: rise 260ms var(--ease-out) both;
 }
 
 .who {
@@ -163,15 +171,15 @@ body {
   color: color-mix(in srgb, var(--paper) 78%, var(--muted));
 }
 
+.line.notice {
+  text-align: center;
+}
+
 .line.notice .speech,
 .line.error .speech {
   font-family: var(--sans);
   font-size: 0.8rem;
   color: var(--muted);
-}
-
-.line.notice {
-  text-align: center;
 }
 
 .line.error .speech {
@@ -189,51 +197,182 @@ body {
   animation: blink 1s steps(2, end) infinite;
 }
 
-/* Composer sits below the page like a prompt for the next line. */
+/* Composer: a bouncy pill that lifts when focused. */
 .composer {
-  display: grid;
-  gap: 0.5rem;
-  padding: 0.95rem 1.6rem 1.25rem;
-  border-top: 1px solid var(--line);
-  background: color-mix(in srgb, var(--board) 72%, transparent);
+  padding: 0 34px 24px;
 }
 
-.prompt-hint {
-  font-size: 0.68rem;
+.box {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 9px 9px 9px 18px;
+  border: 1px solid var(--line);
+  border-radius: 26px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: 0 16px 36px -24px rgb(0 0 0 / 0.7);
+  transition:
+    border-color 220ms ease,
+    box-shadow 220ms ease,
+    transform 220ms var(--ease-bounce);
+}
+
+.box:focus-within {
+  border-color: color-mix(in srgb, var(--copper) 55%, transparent);
+  box-shadow: 0 20px 40px -22px color-mix(in srgb, var(--copper) 60%, transparent);
+  transform: translateY(-2px);
+}
+
+#input {
+  flex: 1;
+  min-height: 26px;
+  max-height: 168px;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--serif);
+  font-size: 1.02rem;
+  line-height: 1.65;
+  resize: none;
+  overflow-y: auto;
+}
+
+#input:focus {
+  outline: none;
+}
+
+#input::placeholder {
+  color: color-mix(in srgb, var(--muted) 62%, transparent);
+}
+
+/* Send stays quiet until there is something to send. */
+.send {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  color: var(--muted);
+  cursor: default;
+  transition:
+    background 220ms ease,
+    color 220ms ease,
+    transform 220ms var(--ease-bounce);
+}
+
+.send[data-mode="ready"],
+.send[data-mode="busy"] {
+  background: var(--copper);
+  color: #fdf8ef;
+  cursor: pointer;
+}
+
+.send[data-mode="ready"]:hover,
+.send[data-mode="busy"]:hover {
+  transform: scale(1.07);
+}
+
+.send:active {
+  transform: scale(0.92);
+}
+
+.send .icon {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.icon-stop {
+  display: none;
+  fill: currentColor;
+  stroke: none;
+}
+
+.send[data-mode="busy"] .icon-arrow {
+  display: none;
+}
+
+.send[data-mode="busy"] .icon-stop {
+  display: block;
+}
+
+/* Rail */
+.rail {
+  width: 264px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 64px 20px 22px;
+  border-left: 1px solid var(--line);
+  background: color-mix(in srgb, var(--board) 50%, transparent);
+  overflow: hidden;
+  transition:
+    width 280ms var(--ease-out),
+    padding 280ms var(--ease-out),
+    opacity 200ms ease,
+    border-color 200ms ease;
+}
+
+.app[data-rail="closed"] .rail {
+  width: 0;
+  padding-left: 0;
+  padding-right: 0;
+  border-left-color: transparent;
+  opacity: 0;
+}
+
+.rail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+}
+
+.rail-label {
+  font-size: 0.66rem;
   letter-spacing: 0.2em;
   color: var(--muted);
 }
 
-textarea {
-  width: 100%;
-  padding: 0.2rem 0;
-  border: 0;
-  resize: none;
+.rail-value {
   font-family: var(--serif);
-  font-size: 1.02rem;
-  line-height: 1.75;
-  color: inherit;
-  background: transparent;
+  font-size: 0.96rem;
+  overflow-wrap: anywhere;
 }
 
-input::placeholder,
-textarea::placeholder {
-  color: color-mix(in srgb, var(--muted) 62%, transparent);
+.rail-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 
-textarea:focus,
-input:focus {
-  outline: none;
+.rail-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.7;
 }
 
-.composer:focus-within {
-  border-top-color: color-mix(in srgb, var(--copper) 60%, transparent);
+.rail-status[data-state="busy"] {
+  color: var(--copper);
 }
 
-.actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
+.rail-status[data-state="busy"]::before {
+  animation: pulse 1.5s ease-in-out infinite;
 }
 
 button {
@@ -245,7 +384,11 @@ button {
   background: var(--copper);
   color: #fdf8ef;
   cursor: pointer;
-  transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease;
 }
 
 button:active:not(:disabled) {
@@ -267,6 +410,13 @@ button:disabled {
   cursor: default;
 }
 
+.rail-button {
+  width: 100%;
+  border-radius: 12px;
+  padding: 0.55rem 0.9rem;
+  justify-self: start;
+}
+
 /* ---------- Settings sheet ---------- */
 
 dialog {
@@ -285,7 +435,7 @@ dialog::backdrop {
 }
 
 dialog[open] {
-  animation: sheet 260ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation: sheet 260ms var(--ease-out) both;
 }
 
 .settings {
@@ -358,7 +508,7 @@ dialog[open] {
 }
 
 .pane.enter {
-  animation: pane-in 220ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+  animation: pane-in 220ms var(--ease-out) both;
 }
 
 .pane-note {
@@ -375,7 +525,6 @@ dialog[open] {
   border-top: 1px solid var(--line);
 }
 
-/* The protocol switch: a slider with both logos. */
 .wire {
   position: relative;
   display: grid;
@@ -433,8 +582,6 @@ dialog[open] {
   transform: scale(1.1);
 }
 
-/* Secondary switch: the two OpenAI API families. */
-/* Address field with the OpenAI API family switch on its right. */
 .url-row {
   display: flex;
   align-items: center;
@@ -455,7 +602,7 @@ dialog[open] {
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  animation: rise 200ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+  animation: rise 200ms var(--ease-out) both;
 }
 
 .shape[hidden] {
@@ -500,9 +647,15 @@ textarea#prompt {
   transition: border-color 180ms ease;
 }
 
+input::placeholder,
+textarea#prompt::placeholder {
+  color: color-mix(in srgb, var(--muted) 62%, transparent);
+}
+
 input:focus,
 textarea#prompt:focus {
   border-color: color-mix(in srgb, var(--copper) 65%, transparent);
+  outline: none;
 }
 
 textarea#prompt {
@@ -539,7 +692,7 @@ textarea#prompt {
 }
 
 .model-list li {
-  animation: rise 200ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+  animation: rise 200ms var(--ease-out) both;
   animation-delay: calc(var(--i, 0) * 14ms);
 }
 
@@ -671,12 +824,14 @@ textarea#prompt {
   .pane.enter,
   .model-list li,
   .speech.streaming::after,
-  .lamp[data-state="busy"]::before {
+  .rail-status[data-state="busy"]::before {
     animation: none;
   }
 
-  .wire-thumb,
-  .wire-option svg {
+  .box,
+  .send,
+  .rail,
+  .rail-toggle {
     transition: none;
   }
 }

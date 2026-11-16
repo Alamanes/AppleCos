@@ -7,28 +7,44 @@
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
-    <header class="masthead">
-      <div class="brand">
-        <span class="brand-name">AppleCos</span>
-        <span class="brand-tag">本地剧场</span>
-      </div>
-      <div class="controls">
-        <span id="endpoint" class="endpoint">未配置端点</span>
-        <span id="status" class="lamp" data-state="idle">待机</span>
-        <button type="button" id="open-settings" class="ghost">幕前设置</button>
-      </div>
-    </header>
+    <div class="app" id="app" data-rail="open">
+      <main class="stage">
+        <div class="titlebar">
+          <span class="wordmark">AppleCos</span>
+          <span class="tag">本地剧场</span>
+        </div>
 
-    <main id="chat" class="script" aria-live="polite"></main>
+        <button type="button" id="toggle-rail" class="rail-toggle" aria-label="收起侧栏">›</button>
 
-    <form id="composer" class="composer">
-      <label class="prompt-hint" for="input">写下这一场的第一句</label>
-      <textarea id="input" rows="2" placeholder="回车递台词，Shift + 回车换行" autofocus></textarea>
-      <div class="actions">
-        <button type="submit" id="send">递台词</button>
-        <button type="button" id="stop" class="ghost" disabled>落幕</button>
-      </div>
-    </form>
+        <div id="chat" class="script" aria-live="polite"></div>
+
+        <form id="composer" class="composer">
+          <div class="box">
+            <textarea id="input" rows="1" placeholder="递一句台词" autofocus></textarea>
+            <button type="button" id="send" class="send" data-mode="idle" aria-label="发送" disabled>
+              <svg class="icon icon-arrow" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 19V5M6 11l6-6 6 6" />
+              </svg>
+              <svg class="icon icon-stop" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="8" y="8" width="8" height="8" rx="1.5" />
+              </svg>
+            </button>
+          </div>
+        </form>
+      </main>
+
+      <aside class="rail" id="rail">
+        <div class="rail-block">
+          <span class="rail-label">模型</span>
+          <span id="endpoint" class="rail-value">未设置模型</span>
+          <span id="status" class="rail-status" data-state="idle">待机</span>
+        </div>
+
+        <div class="rail-block">
+          <button type="button" id="open-settings" class="rail-button">设置</button>
+        </div>
+      </aside>
+    </div>
 
     <dialog id="settings">
       <div class="settings">
@@ -71,6 +87,7 @@
                   OpenAI
                 </button>
               </div>
+
               <label>
                 接口地址
                 <span class="url-row">

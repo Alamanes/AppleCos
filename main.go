@@ -106,7 +106,9 @@ func main() {
 			MinHeight:       440,
 			BackgroundColor: "light-dark(#f2ede1, #0c0d0b)",
 			StateKey:        "main",
-			URL:             "/",
+			// The page draws its own title bar; the traffic lights stay on top.
+			TitleBarStyle: mygo.TitleBarHiddenInset,
+			URL:           "/",
 		})
 	})
 	if err := mygo.App.Run(); err != nil {

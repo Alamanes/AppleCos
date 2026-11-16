@@ -5,23 +5,39 @@ import { ChatView, messageText } from "./ui";
 
 const $ = <T extends HTMLElement>(selector: string): T => document.querySelector<T>(selector)!;
 
+const app = $("#app");
 const view = new ChatView($("#chat"));
 const form = $<HTMLFormElement>("#composer");
 const input = $<HTMLTextAreaElement>("#input");
 const sendButton = $<HTMLButtonElement>("#send");
-const stopButton = $<HTMLButtonElement>("#stop");
 const statusElement = $<HTMLElement>("#status");
 const endpointElement = $<HTMLElement>("#endpoint");
 
 let handle: AgentHandle | null = null;
 let running = false;
 
+/** The send button is idle when empty, ready when it has text, busy while streaming. */
+function syncSend(): void {
+  if (running) {
+    sendButton.dataset.mode = "busy";
+    sendButton.disabled = false;
+    return;
+  }
+  const ready = input.value.trim().length > 0;
+  sendButton.dataset.mode = ready ? "ready" : "idle";
+  sendButton.disabled = !ready;
+}
+
 function setRunning(next: boolean): void {
   running = next;
-  sendButton.disabled = next;
-  stopButton.disabled = !next;
   statusElement.dataset.state = next ? "busy" : "idle";
   statusElement.textContent = next ? "演出中" : "待机";
+  syncSend();
+}
+
+function grow(): void {
+  input.style.height = "auto";
+  input.style.height = `${Math.min(input.scrollHeight, 168)}px`;
 }
 
 function bindAgent(agent: AgentHandle["agent"]): void {
@@ -61,6 +77,7 @@ async function send(): Promise<void> {
   const text = input.value.trim();
   if (!text || !handle || running) return;
   input.value = "";
+  grow();
   view.say("user", text);
   setRunning(true);
   try {
@@ -77,6 +94,11 @@ form.addEventListener("submit", (event) => {
   void send();
 });
 
+input.addEventListener("input", () => {
+  grow();
+  syncSend();
+});
+
 input.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
@@ -84,14 +106,23 @@ input.addEventListener("keydown", (event) => {
   }
 });
 
-stopButton.addEventListener("click", () => {
-  handle?.agent.abort();
+sendButton.addEventListener("click", () => {
+  if (running) {
+    handle?.agent.abort();
+    return;
+  }
+  void send();
+});
+
+$("#toggle-rail").addEventListener("click", () => {
+  app.dataset.rail = app.dataset.rail === "open" ? "closed" : "open";
 });
 
 $("#open-settings").addEventListener("click", () => void openSettings());
 
 async function boot(): Promise<void> {
   setRunning(false);
+  grow();
   initSettings();
 
   const config = await Settings.load();
