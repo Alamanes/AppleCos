@@ -114,15 +114,26 @@ body {
   line-height: 1;
   border: 1px solid var(--line);
   border-radius: 50%;
-  background: color-mix(in srgb, var(--surface) 80%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface) 88%, var(--paper) 12%),
+    color-mix(in srgb, var(--surface) 72%, transparent)
+  );
   color: var(--muted);
-  font-size: 0.9rem;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 6px 16px -10px rgb(0 0 0 / 0.7);
+  backdrop-filter: blur(8px);
   cursor: pointer;
-  transition: transform 240ms var(--ease-bounce), color 180ms ease;
+  transition:
+    transform 240ms var(--ease-bounce),
+    color 180ms ease,
+    filter 180ms ease;
 }
 
 .rail-toggle:hover {
   color: var(--paper);
+  filter: brightness(1.1);
 }
 
 .app[data-rail="closed"] .rail-toggle {
@@ -266,8 +277,15 @@ body {
   place-items: center;
   border: 0;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--muted) 16%, transparent);
-  color: var(--muted);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface) 82%, var(--paper) 18%),
+    color-mix(in srgb, var(--surface) 96%, black 4%)
+  );
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.07),
+    inset 0 -1px 2px rgb(0 0 0 / 0.3);
   cursor: default;
   transition:
     background 220ms ease,
@@ -277,34 +295,52 @@ body {
 
 .send[data-mode="ready"],
 .send[data-mode="busy"] {
-  background: var(--copper);
-  color: #fdf8ef;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--copper) 72%, white 28%),
+    var(--copper) 58%,
+    color-mix(in srgb, var(--copper) 84%, black 16%)
+  );
+  color: #fff6ee;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.4),
+    inset 0 -1px 2px rgb(0 0 0 / 0.25),
+    0 8px 18px -10px color-mix(in srgb, var(--copper) 85%, transparent);
   cursor: pointer;
 }
 
 .send[data-mode="ready"]:hover,
 .send[data-mode="busy"]:hover {
   transform: scale(1.07);
+  filter: brightness(1.06);
 }
 
 .send:active {
   transform: scale(0.92);
+  box-shadow:
+    inset 0 2px 5px rgb(0 0 0 / 0.35),
+    inset 0 -1px 1px rgb(255 255 255 / 0.1);
 }
 
-.send .icon {
+/* Icons are filled SVGs shipped in the bundle, tinted by the button's colour. */
+.icon {
+  display: inline-grid;
+  place-items: center;
   width: 17px;
   height: 17px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  filter: drop-shadow(0 1px 1px rgb(0 0 0 / 0.35));
+}
+
+.icon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .send .icon-stop {
   display: none;
-  fill: currentColor;
-  stroke: none;
+  width: 13px;
+  height: 13px;
 }
 
 .send[data-mode="busy"] .icon-arrow {
@@ -312,7 +348,7 @@ body {
 }
 
 .send[data-mode="busy"] .icon-stop {
-  display: block;
+  display: inline-grid;
 }
 
 /* Rail */
@@ -414,9 +450,14 @@ button:disabled {
 }
 
 .ghost {
-  background: transparent;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--surface) 55%, transparent),
+    transparent
+  );
   color: var(--muted);
   border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.045);
 }
 
 .ghost:hover {
@@ -424,9 +465,21 @@ button:disabled {
 }
 
 .primary {
-  background: var(--copper);
-  color: #fdf8ef;
-  border: 1px solid var(--copper);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--copper) 74%, white 26%),
+    var(--copper) 60%,
+    color-mix(in srgb, var(--copper) 84%, black 16%)
+  );
+  color: #fff6ee;
+  border: 1px solid color-mix(in srgb, var(--copper) 68%, black 32%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.32),
+    0 8px 18px -12px color-mix(in srgb, var(--copper) 70%, transparent);
+}
+
+.primary:hover {
+  filter: brightness(1.05);
 }
 
 .primary:active:not(:disabled),
@@ -435,6 +488,10 @@ button:disabled {
 }
 
 .rail-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
   width: 100%;
   padding: 0.55rem 0.9rem;
   border-radius: 12px;

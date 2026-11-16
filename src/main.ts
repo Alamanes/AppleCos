@@ -1,4 +1,5 @@
 import { createAgent, normalize, type AgentHandle } from "./agent";
+import { mountIcons } from "./icons";
 import { Settings } from "./mygo";
 import { applyTheme, initSettings, openSettings } from "./settings";
 import { ChatView, messageText } from "./ui";
@@ -123,6 +124,7 @@ $("#open-settings").addEventListener("click", () => void openSettings());
 async function boot(): Promise<void> {
   setRunning(false);
   grow();
+  mountIcons();
   initSettings();
 
   const config = await Settings.load();
