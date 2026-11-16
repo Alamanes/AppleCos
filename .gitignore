@@ -8,6 +8,9 @@ build/
 .mygo/
 mygo_windows_*.syso
 
+# Tool scratch files
+.dsh-ops-update-*.lock
+
 # Local toolchain and package caches
 .tools/
 .tmp-npm-cache/

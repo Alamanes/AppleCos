@@ -46,11 +46,10 @@ bun run typecheck    # tsc --noEmit
 bun run build        # 构建并打包，产出 build/darwin-arm64/
 ```
 
-`bun run build` 会依次生成 TypeScript 客户端、构建前端、编译 Go 二进制、做 ad hoc 签名，并产出 dmg：
+`bun run build` 会依次生成 TypeScript 客户端、构建前端、编译 Go 二进制、做 ad hoc 签名，产出 app bundle（脚本带 `-skip-dmg`，不生成磁盘镜像）：
 
 ```text
 build/darwin-arm64/AppleCos.app
-build/darwin-arm64/applecos-0.1.0-arm64.dmg
 ```
 
 没有 Apple Development 证书时使用 ad hoc 签名，系统会在每次重新构建后重新询问权限；正式分发需要开发者证书与公证。
@@ -91,6 +90,6 @@ AppleCos is an experimental, local-first AI roleplay desktop app. It ships as a 
 
 Model requests leave through MyGO's fetch plugin, so they are not subject to CORS and work under the app's custom `mygo://` scheme. The API key lives in the app's Go-side config file, not in the page.
 
-Requires macOS, Go 1.27+, and Bun. `bun run dev` opens a live-reload development window; `bun run build` produces an app bundle and a dmg.
+Requires macOS, Go 1.27+, and Bun. `bun run dev` opens a live-reload development window; `bun run build` produces the app bundle alone.
 
 License: [MIT](LICENSE).

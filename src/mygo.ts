@@ -4,11 +4,23 @@ import { call } from "mygo-runtime";
 
 // ---- Types ----
 
-/** Config is what the app keeps between launches. */
+/**
+ * Config is what the app keeps between launches. It describes one endpoint,
+ * so the app can talk to any OpenAI- or Anthropic-compatible service.
+ */
 export interface Config {
-  provider: string;
+  /** Kind is the wire protocol: "openai" or "anthropic". */
+  kind: string;
+  /** BaseURL is the endpoint root the provider is called at. */
+  baseUrl: string;
+  /** Model is the model id sent in requests. */
   model: string;
+  /** APIKey is stored on disk only, readable by the user alone. */
   apiKey?: string;
+  /** Theme is "system", "light" or "dark". */
+  theme: string;
+  /** Prompt replaces the built-in system prompt when it is not empty. */
+  prompt?: string;
 }
 
 // ---- Services ----

@@ -7,44 +7,123 @@
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
-    <header>
-      <div class="title">
-        <h1>AppleCos</h1>
-        <p class="muted">Pi 内核 · 本地运行</p>
+    <header class="masthead">
+      <div class="brand">
+        <span class="brand-name">AppleCos</span>
+        <span class="brand-tag">本地剧场</span>
       </div>
-      <div class="meta">
-        <span id="model" class="pill">加载中</span>
-        <span id="status" class="muted">空闲</span>
-        <button type="button" id="open-settings" class="ghost">设置</button>
+      <div class="controls">
+        <span id="endpoint" class="endpoint">未配置端点</span>
+        <span id="status" class="lamp" data-state="idle">待机</span>
+        <button type="button" id="open-settings" class="ghost">幕前设置</button>
       </div>
     </header>
 
-    <main id="chat" aria-live="polite"></main>
+    <main id="chat" class="script" aria-live="polite"></main>
 
-    <form id="composer">
-      <textarea id="input" rows="3" placeholder="说点什么，回车发送，Shift+回车换行" autofocus></textarea>
+    <form id="composer" class="composer">
+      <label class="prompt-hint" for="input">写下这一场的第一句</label>
+      <textarea id="input" rows="2" placeholder="回车递台词，Shift + 回车换行" autofocus></textarea>
       <div class="actions">
-        <button type="submit" id="send">发送</button>
-        <button type="button" id="stop" class="ghost" disabled>停止</button>
+        <button type="submit" id="send">递台词</button>
+        <button type="button" id="stop" class="ghost" disabled>落幕</button>
       </div>
     </form>
 
     <dialog id="settings">
-      <form id="settings-form" method="dialog">
-        <h2>设置</h2>
-        <label>
-          API Key
-          <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" />
-        </label>
-        <label>
-          模型
-          <input id="model-id" placeholder="deepseek-flash" autocomplete="off" />
-        </label>
-        <menu>
-          <button type="button" class="ghost" onclick="document.getElementById('settings').close()">取消</button>
-          <button type="submit" value="save">保存</button>
-        </menu>
-      </form>
+      <div class="settings">
+        <nav class="settings-nav">
+          <button type="button" class="nav-item" data-pane="general">通用</button>
+          <button type="button" class="nav-item" data-pane="model">模型</button>
+          <button type="button" class="nav-item" data-pane="persona">个性化</button>
+          <button type="button" class="nav-item" data-pane="about">关于</button>
+        </nav>
+
+        <div class="settings-body">
+          <header class="settings-head">
+            <h2 id="pane-title">通用</h2>
+            <button type="button" class="ghost" id="close-settings">完成</button>
+          </header>
+
+          <div class="panes">
+            <section class="pane" data-pane="general">
+              <p class="pane-note">外观默认跟随系统，也可以固定成习惯的那一种。</p>
+              <div class="theme-row">
+                <button type="button" class="theme-option" data-theme="system">跟随系统</button>
+                <button type="button" class="theme-option" data-theme="light">浅色</button>
+                <button type="button" class="theme-option" data-theme="dark">深色</button>
+              </div>
+            </section>
+
+            <section class="pane" data-pane="model">
+              <div class="wire" id="wire" data-wire="openai">
+                <span class="wire-thumb" aria-hidden="true"></span>
+                <button type="button" class="wire-option" data-wire="anthropic">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z" />
+                  </svg>
+                  Anthropic
+                </button>
+                <button type="button" class="wire-option" data-wire="openai">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.073zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.8956zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654 2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
+                  </svg>
+                  OpenAI
+                </button>
+              </div>
+              <p class="wire-hint" id="wire-hint">OpenAI 兼容 · 请求发往 /v1/chat/completions</p>
+
+              <label>
+                接口地址
+                <input id="base-url" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
+              </label>
+
+              <label>
+                API Key
+                <span class="label-hint" id="key-label-hint">以 Bearer 发送</span>
+                <input id="api-key" type="password" placeholder="留空表示该端点不需要密钥" autocomplete="off" />
+              </label>
+
+              <div class="model-row">
+                <label>
+                  模型
+                  <input id="model-id" placeholder="model-id" autocomplete="off" spellcheck="false" />
+                </label>
+                <button type="button" class="ghost" id="fetch-models">获取列表</button>
+              </div>
+
+              <ul id="model-list" class="model-list"></ul>
+              <p id="model-status" class="model-status"></p>
+            </section>
+
+            <section class="pane" data-pane="persona">
+              <p class="pane-note">留空则使用内置的角色扮演提示词，填了就整段替换它。</p>
+              <label>
+                系统提示词
+                <textarea id="prompt" rows="8" spellcheck="false"></textarea>
+              </label>
+              <button type="button" class="ghost" id="reset-prompt">恢复默认</button>
+            </section>
+
+            <section class="pane" data-pane="about">
+              <dl class="about">
+                <dt>应用</dt>
+                <dd>AppleCos 0.1.0</dd>
+                <dt>框架</dt>
+                <dd>MyGO · Go 单二进制 + 系统 WebView</dd>
+                <dt>内核</dt>
+                <dd>Pi · pi-ai / pi-agent-core 1.5.2</dd>
+                <dt>配置</dt>
+                <dd>~/Library/Application Support/AppleCos/config.json</dd>
+              </dl>
+            </section>
+          </div>
+
+          <footer class="settings-foot">
+            <button type="button" id="save-settings">保存并重启</button>
+          </footer>
+        </div>
+      </div>
     </dialog>
 
     <script type="module" src="./src/main.ts"></script>

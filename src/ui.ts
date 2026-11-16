@@ -1,50 +1,54 @@
-type Role = "user" | "assistant" | "tool" | "error";
+type Role = "user" | "assistant" | "notice" | "error";
 
-/** Minimal transcript view: one bubble per message, streamed text appended in place. */
+interface Line {
+  root: HTMLElement;
+  speech: HTMLElement;
+}
+
+/** Renders the transcript as a script page: who speaks, then the line. */
 export class ChatView {
   private readonly root: HTMLElement;
-  private current: HTMLElement | null = null;
+  private current: Line | null = null;
   private currentText = "";
 
   constructor(root: HTMLElement) {
     this.root = root;
   }
 
-  user(text: string): void {
-    this.bubble("user", text);
+  say(role: Role, text: string): void {
+    const line = this.makeLine(role);
+    line.speech.textContent = text;
     this.scroll();
   }
 
   startAssistant(): void {
     if (this.current) return;
-    this.current = this.bubble("assistant", "");
+    this.current = this.makeLine("assistant");
+    this.current.speech.classList.add("streaming");
     this.currentText = "";
   }
 
   delta(text: string): void {
     this.startAssistant();
+    if (!this.current) return;
     this.currentText += text;
-    if (this.current) this.current.textContent = this.currentText;
+    this.current.speech.textContent = this.currentText;
     this.scroll();
   }
 
   finishAssistant(text: string): void {
     this.startAssistant();
+    if (!this.current) return;
     this.currentText = text;
-    if (this.current) this.current.textContent = text;
+    this.current.speech.textContent = text;
+    this.current.speech.classList.remove("streaming");
     this.current = null;
-    this.scroll();
-  }
-
-  tool(name: string, text: string): void {
-    this.bubble("tool", `${name} ${text}`.trim());
     this.scroll();
   }
 
   error(text: string): void {
     this.current = null;
-    this.bubble("error", text);
-    this.scroll();
+    this.say("error", text);
   }
 
   clear(): void {
@@ -57,12 +61,22 @@ export class ChatView {
     this.root.scrollTop = this.root.scrollHeight;
   }
 
-  private bubble(role: Role, text: string): HTMLElement {
-    const el = document.createElement("div");
-    el.className = `bubble ${role}`;
-    el.textContent = text;
-    this.root.append(el);
-    return el;
+  private makeLine(role: Role): Line {
+    const article = document.createElement("article");
+    article.className = `line ${role}`;
+
+    if (role !== "error" && role !== "notice") {
+      const who = document.createElement("span");
+      who.className = "who";
+      who.textContent = role === "user" ? "你" : "AppleCos";
+      article.append(who);
+    }
+
+    const speech = document.createElement("p");
+    speech.className = "speech";
+    article.append(speech);
+    this.root.append(article);
+    return { root: article, speech };
   }
 }
 

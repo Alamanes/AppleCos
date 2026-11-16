@@ -1,5 +1,6 @@
-import { createAgent, type AgentHandle } from "./agent";
+import { createAgent, normalize, type AgentHandle } from "./agent";
 import { Settings } from "./mygo";
+import { applyTheme, initSettings, openSettings } from "./settings";
 import { ChatView, messageText } from "./ui";
 
 const $ = <T extends HTMLElement>(selector: string): T => document.querySelector<T>(selector)!;
@@ -10,10 +11,7 @@ const input = $<HTMLTextAreaElement>("#input");
 const sendButton = $<HTMLButtonElement>("#send");
 const stopButton = $<HTMLButtonElement>("#stop");
 const statusElement = $<HTMLElement>("#status");
-const modelElement = $<HTMLElement>("#model");
-const dialog = $<HTMLDialogElement>("#settings");
-const keyInput = $<HTMLInputElement>("#api-key");
-const modelInput = $<HTMLInputElement>("#model-id");
+const endpointElement = $<HTMLElement>("#endpoint");
 
 let handle: AgentHandle | null = null;
 let running = false;
@@ -22,7 +20,8 @@ function setRunning(next: boolean): void {
   running = next;
   sendButton.disabled = next;
   stopButton.disabled = !next;
-  statusElement.textContent = next ? "生成中" : "空闲";
+  statusElement.dataset.state = next ? "busy" : "idle";
+  statusElement.textContent = next ? "演出中" : "待机";
 }
 
 function bindAgent(agent: AgentHandle["agent"]): void {
@@ -46,10 +45,10 @@ function bindAgent(agent: AgentHandle["agent"]): void {
         break;
       }
       case "tool_execution_start":
-        view.tool(String(anyEvent.toolName), "开始");
+        view.say("notice", `工具 ${String(anyEvent.toolName)} 开始`);
         break;
       case "tool_execution_end":
-        view.tool(String(anyEvent.toolName), "完成");
+        view.say("notice", `工具 ${String(anyEvent.toolName)} 完成`);
         break;
       case "agent_end":
         setRunning(false);
@@ -62,7 +61,7 @@ async function send(): Promise<void> {
   const text = input.value.trim();
   if (!text || !handle || running) return;
   input.value = "";
-  view.user(text);
+  view.say("user", text);
   setRunning(true);
   try {
     await handle.agent.prompt(text);
@@ -89,37 +88,30 @@ stopButton.addEventListener("click", () => {
   handle?.agent.abort();
 });
 
-$("#open-settings").addEventListener("click", () => {
-  dialog.showModal();
-});
-
-$("#settings-form").addEventListener("submit", (event) => {
-  event.preventDefault();
-  void (async () => {
-    await Settings.save({
-      provider: "deepseek",
-      model: modelInput.value.trim() || "deepseek-flash",
-      apiKey: keyInput.value.trim(),
-    });
-    dialog.close();
-    location.reload();
-  })();
-});
+$("#open-settings").addEventListener("click", () => void openSettings());
 
 async function boot(): Promise<void> {
   setRunning(false);
+  initSettings();
+
+  const config = await Settings.load();
+  applyTheme(config.theme ?? "system");
+
+  const endpoint = normalize(config);
+  const configured = endpoint.baseUrl !== "" && endpoint.model !== "";
+  endpointElement.textContent = configured
+    ? `${endpoint.kind === "anthropic" ? "Anthropic" : "OpenAI"} 兼容 · ${endpoint.model}`
+    : "未配置端点";
+
+  if (!configured) {
+    void openSettings();
+    return;
+  }
+
   try {
-    const config = await Settings.load();
-    keyInput.value = config.apiKey ?? "";
-    modelInput.value = config.model;
     handle = await createAgent();
-    modelElement.textContent = `${handle.provider} / ${handle.model.id}`;
     bindAgent(handle.agent);
     input.focus();
-    if (!config.apiKey) {
-      view.error("还没有保存 API Key。点右上角「设置」填入 DeepSeek 的 Key。");
-      dialog.showModal();
-    }
   } catch (error) {
     view.error(`启动失败：${String(error)}`);
   }

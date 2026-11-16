@@ -15,15 +15,25 @@ import (
 // into typed TypeScript functions in src/mygo.ts.
 type Settings struct{}
 
-// Config is what the app keeps between launches.
+// Config is what the app keeps between launches. It describes one endpoint,
+// so the app can talk to any OpenAI- or Anthropic-compatible service.
 type Config struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	APIKey   string `json:"apiKey,omitempty"`
+	// Kind is the wire protocol: "openai" or "anthropic".
+	Kind string `json:"kind"`
+	// BaseURL is the endpoint root the provider is called at.
+	BaseURL string `json:"baseUrl"`
+	// Model is the model id sent in requests.
+	Model string `json:"model"`
+	// APIKey is stored on disk only, readable by the user alone.
+	APIKey string `json:"apiKey,omitempty"`
+	// Theme is "system", "light" or "dark".
+	Theme string `json:"theme"`
+	// Prompt replaces the built-in system prompt when it is not empty.
+	Prompt string `json:"prompt,omitempty"`
 }
 
-// defaults apply until the user saves a configuration of their own.
-var defaults = Config{Provider: "deepseek", Model: "deepseek-v4-flash"}
+// defaults apply until the user saves settings of their own.
+var defaults = Config{Kind: "openai", Theme: "system"}
 
 func configPath() (string, error) {
 	dir, err := mygo.App.Path(mygo.PathUserData)
@@ -50,11 +60,11 @@ func (Settings) Load() (Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
 	}
-	if cfg.Provider == "" {
-		cfg.Provider = defaults.Provider
+	if cfg.Kind != "anthropic" {
+		cfg.Kind = "openai"
 	}
-	if cfg.Model == "" {
-		cfg.Model = defaults.Model
+	if cfg.Theme != "light" && cfg.Theme != "dark" {
+		cfg.Theme = "system"
 	}
 	return cfg, nil
 }
@@ -85,10 +95,10 @@ func main() {
 		mygo.NewWindow(mygo.WindowOptions{
 			Title:           "AppleCos",
 			Width:           980,
-			Height:          700,
+			Height:          720,
 			MinWidth:        560,
-			MinHeight:       420,
-			BackgroundColor: "light-dark(#f6f7f9, #0f1115)",
+			MinHeight:       440,
+			BackgroundColor: "light-dark(#f2ede1, #0c0d0b)",
 			StateKey:        "main",
 			URL:             "/",
 		})
