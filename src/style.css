@@ -1,0 +1,221 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+  --bg: #f6f7f9;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --card: #ffffff;
+  --accent: #2563eb;
+  --user: #e8f0fe;
+  --line: color-mix(in srgb, var(--muted) 25%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --card: #1a1d23;
+    --user: #1e2a3d;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--fg);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.4rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.title h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+.title p {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+}
+
+.pill {
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  font-variant-numeric: tabular-nums;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+#chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 1.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.bubble {
+  max-width: min(42rem, 88%);
+  padding: 0.65rem 0.9rem;
+  border-radius: 14px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: var(--user);
+  border-color: transparent;
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+}
+
+.bubble.tool {
+  align-self: center;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: transparent;
+  border-style: dashed;
+}
+
+.bubble.error {
+  align-self: center;
+  color: #b91c1c;
+  background: color-mix(in srgb, #b91c1c 10%, transparent);
+  border-color: color-mix(in srgb, #b91c1c 35%, transparent);
+}
+
+.bubble.assistant:empty::after {
+  content: "…";
+  color: var(--muted);
+}
+
+#composer {
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.9rem 1.4rem 1.2rem;
+  border-top: 1px solid var(--line);
+}
+
+textarea {
+  flex: 1;
+  resize: none;
+  font: inherit;
+  padding: 0.65rem 0.85rem;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: inherit;
+}
+
+textarea:focus,
+input:focus {
+  outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  justify-content: flex-end;
+}
+
+button {
+  font: inherit;
+  padding: 0.45rem 1rem;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: white;
+  cursor: pointer;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--line);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--card);
+  color: var(--fg);
+  padding: 1.2rem;
+  width: min(420px, 88vw);
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.35);
+}
+
+dialog h2 {
+  margin: 0 0 0.9rem;
+  font-size: 1rem;
+}
+
+dialog label {
+  display: block;
+  margin-bottom: 0.8rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+dialog input {
+  display: block;
+  width: 100%;
+  margin-top: 0.25rem;
+  font: inherit;
+  padding: 0.5rem 0.7rem;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding: 0;
+}

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AppleCos</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="title">
+        <h1>AppleCos</h1>
+        <p class="muted">Pi 内核 · 本地运行</p>
+      </div>
+      <div class="meta">
+        <span id="model" class="pill">加载中</span>
+        <span id="status" class="muted">空闲</span>
+        <button type="button" id="open-settings" class="ghost">设置</button>
+      </div>
+    </header>
+
+    <main id="chat" aria-live="polite"></main>
+
+    <form id="composer">
+      <textarea id="input" rows="3" placeholder="说点什么，回车发送，Shift+回车换行" autofocus></textarea>
+      <div class="actions">
+        <button type="submit" id="send">发送</button>
+        <button type="button" id="stop" class="ghost" disabled>停止</button>
+      </div>
+    </form>
+
+    <dialog id="settings">
+      <form id="settings-form" method="dialog">
+        <h2>设置</h2>
+        <label>
+          API Key
+          <input id="api-key" type="password" placeholder="sk-..." autocomplete="off" />
+        </label>
+        <label>
+          模型
+          <input id="model-id" placeholder="deepseek-flash" autocomplete="off" />
+        </label>
+        <menu>
+          <button type="button" class="ghost" onclick="document.getElementById('settings').close()">取消</button>
+          <button type="submit" value="save">保存</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

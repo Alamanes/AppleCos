@@ -5,6 +5,13 @@ node_modules/
 # Build output
 dist/
 build/
+.mygo/
+mygo_windows_*.syso
+
+# Local toolchain and package caches
+.tools/
+.tmp-npm-cache/
+.skel/
 *.tsbuildinfo
 
 # Upstream reference dumps (local only)
