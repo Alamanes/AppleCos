@@ -73,14 +73,15 @@
               </div>
               <p class="wire-hint" id="wire-hint">OpenAI 兼容 · 请求发往 /v1/chat/completions</p>
 
-              <div class="shape" id="shape" data-shape="chat" hidden>
-                <button type="button" class="shape-option" data-shape="chat">Chat Completions</button>
-                <button type="button" class="shape-option" data-shape="responses">Responses</button>
-              </div>
-
               <label>
                 接口地址
-                <input id="base-url" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
+                <span class="url-row">
+                  <input id="base-url" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
+                  <span class="shape" id="shape" data-shape="chat" hidden>
+                    <button type="button" class="shape-option" data-shape="chat">Chat</button>
+                    <button type="button" class="shape-option" data-shape="responses">Responses</button>
+                  </span>
+                </span>
               </label>
 
               <label>

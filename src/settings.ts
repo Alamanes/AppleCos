@@ -1,6 +1,6 @@
 import { fetch as goFetch } from "@mygo-plugins/fetch";
 
-import type { Shape, Wire } from "./agent";
+import { detectRoute, type Route, type Shape, type Wire } from "./agent";
 import { Settings, type Config } from "./mygo";
 
 export interface ModelEntry {
@@ -156,6 +156,18 @@ function renderModels(list: ModelEntry[]): void {
   );
 }
 
+/** Route for whatever is currently typed, honouring a pasted full endpoint URL. */
+function currentRoute(): Route {
+  const raw = $<HTMLInputElement>("#base-url").value;
+  const detected = detectRoute(raw);
+  if (detected) return detected;
+  return {
+    kind: draft.kind === "anthropic" ? "anthropic" : "openai",
+    shape: draft.shape === "responses" ? "responses" : "chat",
+    baseUrl: raw.trim().replace(/\/+$/, ""),
+  };
+}
+
 async function loadModels(): Promise<void> {
   const button = $<HTMLButtonElement>("#fetch-models");
   const status = $("#model-status");
@@ -163,9 +175,10 @@ async function loadModels(): Promise<void> {
   status.dataset.state = "busy";
   status.textContent = "正在获取…";
   try {
+    const route = currentRoute();
     const list = await listModels(
-      draft.kind === "anthropic" ? "anthropic" : "openai",
-      $<HTMLInputElement>("#base-url").value,
+      route.kind,
+      route.baseUrl,
       $<HTMLInputElement>("#api-key").value,
     );
     renderModels(list);
@@ -192,6 +205,14 @@ export function initSettings(): void {
     button.addEventListener("click", () => setWire(button.dataset.wire === "anthropic" ? "anthropic" : "openai"));
   }
 
+  $<HTMLInputElement>("#base-url").addEventListener("blur", () => {
+    const route = detectRoute($<HTMLInputElement>("#base-url").value);
+    if (!route) return;
+    $<HTMLInputElement>("#base-url").value = route.baseUrl;
+    setWire(route.kind);
+    if (route.kind === "openai") setShape(route.shape);
+  });
+
   for (const button of document.querySelectorAll<HTMLButtonElement>(".shape-option")) {
     button.addEventListener("click", () =>
       setShape(button.dataset.shape === "responses" ? "responses" : "chat"),
@@ -216,10 +237,11 @@ export function initSettings(): void {
 
   $("#save-settings").addEventListener("click", () => {
     void (async () => {
+      const route = currentRoute();
       await Settings.save({
-        kind: draft.kind,
-        shape: draft.shape === "responses" ? "responses" : "chat",
-        baseUrl: $<HTMLInputElement>("#base-url").value.trim(),
+        kind: route.kind,
+        shape: route.shape,
+        baseUrl: route.baseUrl,
         model: $<HTMLInputElement>("#model-id").value.trim(),
         apiKey: $<HTMLInputElement>("#api-key").value.trim(),
         theme: draft.theme,

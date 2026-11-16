@@ -39,6 +39,34 @@ const SYSTEM_PROMPT = [
 /** Zero cost keeps the transcript view free of made-up prices for custom endpoints. */
 const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
+export interface Route {
+  kind: Wire;
+  shape: Shape;
+  baseUrl: string;
+}
+
+const ROUTE_RULES: { pattern: RegExp; kind: Wire; shape: Shape }[] = [
+  { pattern: /\/chat\/completions$/i, kind: "openai", shape: "chat" },
+  { pattern: /\/responses$/i, kind: "openai", shape: "responses" },
+  { pattern: /\/messages$/i, kind: "anthropic", shape: "chat" },
+];
+
+/**
+ * Recognizes a pasted full endpoint URL and reduces it to the base URL the
+ * provider needs. Anthropic drops the trailing /v1 because its SDK adds it.
+ */
+export function detectRoute(raw: string): Route | null {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  if (!trimmed) return null;
+  for (const rule of ROUTE_RULES) {
+    if (!rule.pattern.test(trimmed)) continue;
+    let baseUrl = trimmed.replace(rule.pattern, "");
+    if (rule.kind === "anthropic") baseUrl = baseUrl.replace(/\/v1$/i, "");
+    return { kind: rule.kind, shape: rule.shape, baseUrl };
+  }
+  return null;
+}
+
 export function normalize(config: {
   kind: string;
   shape?: string;
@@ -46,10 +74,11 @@ export function normalize(config: {
   model: string;
   apiKey?: string;
 }): Endpoint {
+  const route = detectRoute(config.baseUrl);
   return {
-    kind: config.kind === "anthropic" ? "anthropic" : "openai",
-    shape: config.shape === "responses" ? "responses" : "chat",
-    baseUrl: config.baseUrl.trim().replace(/\/+$/, ""),
+    kind: route ? route.kind : config.kind === "anthropic" ? "anthropic" : "openai",
+    shape: route ? route.shape : config.shape === "responses" ? "responses" : "chat",
+    baseUrl: route ? route.baseUrl : config.baseUrl.trim().replace(/\/+$/, ""),
     model: config.model.trim(),
     apiKey: (config.apiKey ?? "").trim(),
   };
