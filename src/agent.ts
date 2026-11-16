@@ -67,6 +67,11 @@ export function detectRoute(raw: string): Route | null {
   return null;
 }
 
+/** Address used when the user leaves the field empty. */
+export function defaultBaseUrl(kind: Wire): string {
+  return kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1";
+}
+
 export function normalize(config: {
   kind: string;
   shape?: string;
@@ -75,10 +80,13 @@ export function normalize(config: {
   apiKey?: string;
 }): Endpoint {
   const route = detectRoute(config.baseUrl);
+  const kind: Wire = route ? route.kind : config.kind === "anthropic" ? "anthropic" : "openai";
+  const typed = config.baseUrl.trim().replace(/\/+$/, "");
   return {
-    kind: route ? route.kind : config.kind === "anthropic" ? "anthropic" : "openai",
+    kind,
     shape: route ? route.shape : config.shape === "responses" ? "responses" : "chat",
-    baseUrl: route ? route.baseUrl : config.baseUrl.trim().replace(/\/+$/, ""),
+    // An empty address falls back to the protocol's own endpoint.
+    baseUrl: route ? route.baseUrl : typed || defaultBaseUrl(kind),
     model: config.model.trim(),
     apiKey: (config.apiKey ?? "").trim(),
   };

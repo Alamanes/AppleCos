@@ -218,7 +218,7 @@ textarea {
 
 input::placeholder,
 textarea::placeholder {
-  color: color-mix(in srgb, var(--muted) 48%, transparent);
+  color: color-mix(in srgb, var(--muted) 62%, transparent);
 }
 
 textarea:focus,

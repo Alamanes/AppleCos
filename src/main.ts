@@ -98,7 +98,7 @@ async function boot(): Promise<void> {
   applyTheme(config.theme ?? "system");
 
   const endpoint = normalize(config);
-  const configured = endpoint.baseUrl !== "" && endpoint.model !== "";
+  const configured = endpoint.model !== "";
   endpointElement.textContent = configured ? endpoint.model : "未设置模型";
 
   if (!configured) {

@@ -1,6 +1,6 @@
 import { fetch as goFetch } from "@mygo-plugins/fetch";
 
-import { detectRoute, type Route, type Shape, type Wire } from "./agent";
+import { defaultBaseUrl, detectRoute, type Route, type Shape, type Wire } from "./agent";
 import { Settings, type Config } from "./mygo";
 
 export interface ModelEntry {
@@ -148,10 +148,11 @@ function currentRoute(): Route {
   const raw = $<HTMLInputElement>("#base-url").value;
   const detected = detectRoute(raw);
   if (detected) return detected;
+  const kind: Wire = draft.kind === "anthropic" ? "anthropic" : "openai";
   return {
-    kind: draft.kind === "anthropic" ? "anthropic" : "openai",
+    kind,
     shape: draft.shape === "responses" ? "responses" : "chat",
-    baseUrl: raw.trim().replace(/\/+$/, ""),
+    baseUrl: raw.trim().replace(/\/+$/, "") || defaultBaseUrl(kind),
   };
 }
 
