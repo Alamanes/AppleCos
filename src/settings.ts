@@ -35,7 +35,7 @@ export interface ModelEntry {
 }
 
 const DEFAULT_PROMPT =
-  "你是 AppleCos 的角色扮演引擎，运行在用户自己的 Mac 上。\n用简体中文回答，保持角色设定与沉浸感，不要解释你自己的实现细节。";
+  "在这里补充额外的叙事要求，会作为「附加要求」加入提示词。\n例如：多用环境细节推进气氛，不要替玩家做决定。";
 
 const $ = <T extends HTMLElement>(selector: string): T => document.querySelector<T>(selector)!;
 const $$ = <T extends HTMLElement>(selector: string): T[] =>

@@ -40,7 +40,7 @@ export const NARRATOR_RULES = [
 export const OUTPUT_FORMAT_RULES = [
   "每次回复只输出一个 JSON 对象，不输出 JSON 以外的任何文字，也不使用代码围栏。",
   "",
-  '结构如下：{"blocks":[{"kind":"narration","text":"雨还在敲铁皮顶。"},{"kind":"speech","speaker":"角色名","text":"你叫什么名字？"},{"kind":"thought","speaker":"角色名","text":"他看起来不像本地人。"}]}',
+  '结构如下：{"blocks":[{"kind":"narration","text":"天已经黑了。"},{"kind":"speech","speaker":"角色名","text":"你从哪里来？"},{"kind":"thought","speaker":"角色名","text":"这人不像是常客。"}]}',
   "",
   "示例里的「角色名」只是占位，输出时换成角色卡中的实际名字。",
   "",
