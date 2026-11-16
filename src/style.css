@@ -432,12 +432,6 @@ dialog[open] {
   transform: scale(1.1);
 }
 
-.wire-hint {
-  margin: 0.55rem 0 0.55rem;
-  font-size: 0.72rem;
-  color: var(--muted);
-}
-
 /* Secondary switch: the two OpenAI API families. */
 /* Address field with the OpenAI API family switch on its right. */
 .url-row {
@@ -480,12 +474,6 @@ dialog[open] {
 .shape-option.selected {
   color: var(--paper);
   background: color-mix(in srgb, var(--copper) 18%, transparent);
-}
-
-.label-hint {
-  margin-left: 0.4rem;
-  font-size: 0.68rem;
-  color: color-mix(in srgb, var(--muted) 80%, transparent);
 }
 
 label {

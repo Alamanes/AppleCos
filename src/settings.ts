@@ -80,27 +80,14 @@ function showPane(pane: Pane): void {
   $("#pane-title").textContent = PANE_TITLES[pane];
 }
 
-/** Keeps the hint, placeholder and shape switch in sync with kind + shape. */
+/** Keeps the address hint and the API family switch in sync with kind + shape. */
 function updateHint(): void {
-  const hint = $("#wire-hint");
   const shapeRow = $("#shape");
   const baseUrl = $<HTMLInputElement>("#base-url");
 
-  if (draft.kind === "anthropic") {
-    shapeRow.hidden = true;
-    hint.textContent = "Anthropic 兼容 · 请求发往 /v1/messages";
-    baseUrl.placeholder = "https://api.anthropic.com";
-    $("#key-label-hint").textContent = "以 x-api-key 发送";
-    return;
-  }
-
-  shapeRow.hidden = false;
-  hint.textContent =
-    draft.shape === "responses"
-      ? "OpenAI Responses · 请求发往 /v1/responses"
-      : "OpenAI 兼容 · 请求发往 /v1/chat/completions";
-  baseUrl.placeholder = "https://api.openai.com/v1";
-  $("#key-label-hint").textContent = "以 Bearer 发送";
+  shapeRow.hidden = draft.kind === "anthropic";
+  baseUrl.placeholder =
+    draft.kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1";
 }
 
 function setWire(kind: Wire): void {

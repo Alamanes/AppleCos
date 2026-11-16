@@ -99,9 +99,7 @@ async function boot(): Promise<void> {
 
   const endpoint = normalize(config);
   const configured = endpoint.baseUrl !== "" && endpoint.model !== "";
-  endpointElement.textContent = configured
-    ? `${endpoint.kind === "anthropic" ? "Anthropic" : "OpenAI"} 兼容 · ${endpoint.model}`
-    : "未配置端点";
+  endpointElement.textContent = configured ? endpoint.model : "未设置模型";
 
   if (!configured) {
     void openSettings();
