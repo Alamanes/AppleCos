@@ -20,7 +20,7 @@
 
         <form id="composer" class="composer">
           <div class="box">
-            <textarea id="input" rows="1" placeholder="递一句台词" autofocus></textarea>
+            <textarea id="input" class="composer-input" rows="1" placeholder="递一句台词" autofocus></textarea>
             <button type="button" id="send" class="send" data-mode="idle" aria-label="发送" disabled>
               <svg class="icon icon-arrow" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 19V5M6 11l6-6 6 6" />
@@ -41,12 +41,12 @@
         </div>
 
         <div class="rail-block">
-          <button type="button" id="open-settings" class="rail-button">设置</button>
+          <button type="button" id="open-settings" class="primary rail-button">设置</button>
         </div>
       </aside>
     </div>
 
-    <dialog id="settings">
+    <dialog id="settings" class="sheet">
       <div class="settings">
         <nav class="settings-nav">
           <button type="button" class="nav-item" data-pane="general">通用</button>
@@ -88,10 +88,10 @@
                 </button>
               </div>
 
-              <label>
+              <label class="field-label">
                 接口地址
                 <span class="url-row">
-                  <input id="base-url" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
+                  <input id="base-url" class="field" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false" />
                   <span class="shape" id="shape" data-shape="chat" hidden>
                     <button type="button" class="shape-option" data-shape="chat">Chat</button>
                     <button type="button" class="shape-option" data-shape="responses">Responses</button>
@@ -99,15 +99,15 @@
                 </span>
               </label>
 
-              <label>
+              <label class="field-label">
                 API Key
-                <input id="api-key" type="password" placeholder="留空表示该端点不需要密钥" autocomplete="off" />
+                <input id="api-key" class="field" type="password" placeholder="留空表示该端点不需要密钥" autocomplete="off" />
               </label>
 
               <div class="model-row">
-                <label>
+                <label class="field-label">
                   模型
-                  <input id="model-id" placeholder="model-id" autocomplete="off" spellcheck="false" />
+                  <input id="model-id" class="field" placeholder="model-id" autocomplete="off" spellcheck="false" />
                 </label>
                 <button type="button" class="ghost" id="fetch-models">获取列表</button>
               </div>
@@ -118,9 +118,9 @@
 
             <section class="pane" data-pane="persona">
               <p class="pane-note">留空则使用内置的角色扮演提示词，填了就整段替换它。</p>
-              <label>
+              <label class="field-label">
                 系统提示词
-                <textarea id="prompt" rows="8" spellcheck="false"></textarea>
+                <textarea id="prompt" class="field" rows="8" spellcheck="false"></textarea>
               </label>
               <button type="button" class="ghost" id="reset-prompt">恢复默认</button>
             </section>
