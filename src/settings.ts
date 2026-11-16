@@ -1,6 +1,6 @@
 import { fetch as goFetch } from "@mygo-plugins/fetch";
 
-import type { Wire } from "./agent";
+import type { Shape, Wire } from "./agent";
 import { Settings, type Config } from "./mygo";
 
 export interface ModelEntry {
@@ -57,7 +57,7 @@ export async function listModels(kind: Wire, baseUrl: string, apiKey: string): P
     .filter((entry) => entry.id !== "");
 }
 
-let draft: Config = { kind: "openai", baseUrl: "", model: "", theme: "system" };
+let draft: Config = { kind: "openai", shape: "chat", baseUrl: "", model: "", theme: "system" };
 let bound = false;
 
 function applyTheme(theme: string): void {
@@ -80,6 +80,29 @@ function showPane(pane: Pane): void {
   $("#pane-title").textContent = PANE_TITLES[pane];
 }
 
+/** Keeps the hint, placeholder and shape switch in sync with kind + shape. */
+function updateHint(): void {
+  const hint = $("#wire-hint");
+  const shapeRow = $("#shape");
+  const baseUrl = $<HTMLInputElement>("#base-url");
+
+  if (draft.kind === "anthropic") {
+    shapeRow.hidden = true;
+    hint.textContent = "Anthropic 兼容 · 请求发往 /v1/messages";
+    baseUrl.placeholder = "https://api.anthropic.com";
+    $("#key-label-hint").textContent = "以 x-api-key 发送";
+    return;
+  }
+
+  shapeRow.hidden = false;
+  hint.textContent =
+    draft.shape === "responses"
+      ? "OpenAI Responses · 请求发往 /v1/responses"
+      : "OpenAI 兼容 · 请求发往 /v1/chat/completions";
+  baseUrl.placeholder = "https://api.openai.com/v1";
+  $("#key-label-hint").textContent = "以 Bearer 发送";
+}
+
 function setWire(kind: Wire): void {
   draft.kind = kind;
   const wire = $("#wire");
@@ -87,14 +110,18 @@ function setWire(kind: Wire): void {
   for (const button of wire.querySelectorAll<HTMLButtonElement>(".wire-option")) {
     button.classList.toggle("selected", button.dataset.wire === kind);
   }
-  $("#wire-hint").textContent =
-    kind === "anthropic"
-      ? "Anthropic 兼容 · 请求发往 /v1/messages"
-      : "OpenAI 兼容 · 请求发往 /v1/chat/completions";
-  $<HTMLInputElement>("#base-url").placeholder =
-    kind === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1";
-  $<HTMLInputElement>("#key-label-hint").textContent =
-    kind === "anthropic" ? "以 x-api-key 发送" : "以 Bearer 发送";
+  updateHint();
+}
+
+/** Switches between Chat Completions and Responses for the OpenAI family. */
+function setShape(shape: Shape): void {
+  draft.shape = shape;
+  const row = $("#shape");
+  row.dataset.shape = shape;
+  for (const button of row.querySelectorAll<HTMLButtonElement>(".shape-option")) {
+    button.classList.toggle("selected", button.dataset.shape === shape);
+  }
+  updateHint();
 }
 
 function setTheme(theme: Theme): void {
@@ -165,6 +192,12 @@ export function initSettings(): void {
     button.addEventListener("click", () => setWire(button.dataset.wire === "anthropic" ? "anthropic" : "openai"));
   }
 
+  for (const button of document.querySelectorAll<HTMLButtonElement>(".shape-option")) {
+    button.addEventListener("click", () =>
+      setShape(button.dataset.shape === "responses" ? "responses" : "chat"),
+    );
+  }
+
   for (const button of document.querySelectorAll<HTMLButtonElement>(".theme-option")) {
     const theme = button.dataset.theme;
     button.addEventListener("click", () => {
@@ -185,6 +218,7 @@ export function initSettings(): void {
     void (async () => {
       await Settings.save({
         kind: draft.kind,
+        shape: draft.shape === "responses" ? "responses" : "chat",
         baseUrl: $<HTMLInputElement>("#base-url").value.trim(),
         model: $<HTMLInputElement>("#model-id").value.trim(),
         apiKey: $<HTMLInputElement>("#api-key").value.trim(),
@@ -207,6 +241,7 @@ export async function openSettings(): Promise<void> {
     button.classList.toggle("selected", button.dataset.theme === (config.theme ?? "system"));
   }
   setWire(config.kind === "anthropic" ? "anthropic" : "openai");
+  setShape(config.shape === "responses" ? "responses" : "chat");
   $<HTMLInputElement>("#base-url").value = config.baseUrl ?? "";
   $<HTMLInputElement>("#model-id").value = config.model ?? "";
   $<HTMLInputElement>("#api-key").value = config.apiKey ?? "";

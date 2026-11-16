@@ -22,6 +22,9 @@ type Config struct {
 	Kind string `json:"kind"`
 	// BaseURL is the endpoint root the provider is called at.
 	BaseURL string `json:"baseUrl"`
+	// Shape selects the OpenAI API family: "chat" for /v1/chat/completions,
+	// "responses" for /v1/responses. Ignored when Kind is "anthropic".
+	Shape string `json:"shape"`
 	// Model is the model id sent in requests.
 	Model string `json:"model"`
 	// APIKey is stored on disk only, readable by the user alone.
@@ -33,7 +36,7 @@ type Config struct {
 }
 
 // defaults apply until the user saves settings of their own.
-var defaults = Config{Kind: "openai", Theme: "system"}
+var defaults = Config{Kind: "openai", Shape: "chat", Theme: "system"}
 
 func configPath() (string, error) {
 	dir, err := mygo.App.Path(mygo.PathUserData)
@@ -62,6 +65,9 @@ func (Settings) Load() (Config, error) {
 	}
 	if cfg.Kind != "anthropic" {
 		cfg.Kind = "openai"
+	}
+	if cfg.Shape != "responses" {
+		cfg.Shape = "chat"
 	}
 	if cfg.Theme != "light" && cfg.Theme != "dark" {
 		cfg.Theme = "system"

@@ -432,9 +432,39 @@ dialog[open] {
 }
 
 .wire-hint {
-  margin: 0.55rem 0 1.1rem;
+  margin: 0.55rem 0 0.55rem;
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+/* Secondary switch: the two OpenAI API families. */
+.shape {
+  display: inline-flex;
+  gap: 2px;
+  margin: 0 0 1rem;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  animation: rise 200ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+.shape[hidden] {
+  display: none;
+}
+
+.shape-option {
+  padding: 0.3rem 0.85rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.72rem;
+  transition: color 200ms ease, background 200ms ease;
+}
+
+.shape-option.selected {
+  color: var(--paper);
+  background: color-mix(in srgb, var(--copper) 18%, transparent);
 }
 
 .label-hint {

@@ -8,14 +8,19 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import { fetch as goFetch } from "@mygo-plugins/fetch";
 
 import { Settings } from "./mygo";
 
+/** Wire family: Anthropic messages, or one of the two OpenAI APIs. */
 export type Wire = "openai" | "anthropic";
+/** OpenAI API family: Chat Completions or Responses. */
+export type Shape = "chat" | "responses";
 
 export interface Endpoint {
   kind: Wire;
+  shape: Shape;
   baseUrl: string;
   model: string;
   apiKey: string;
@@ -36,21 +41,33 @@ const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 export function normalize(config: {
   kind: string;
+  shape?: string;
   baseUrl: string;
   model: string;
   apiKey?: string;
 }): Endpoint {
   return {
     kind: config.kind === "anthropic" ? "anthropic" : "openai",
+    shape: config.shape === "responses" ? "responses" : "chat",
     baseUrl: config.baseUrl.trim().replace(/\/+$/, ""),
     model: config.model.trim(),
     apiKey: (config.apiKey ?? "").trim(),
   };
 }
 
+/** Which pi-ai implementation answers this endpoint. */
+function apiFor(endpoint: Endpoint): { id: Api; streams: ReturnType<typeof openAICompletionsApi> } {
+  if (endpoint.kind === "anthropic") {
+    return { id: "anthropic-messages", streams: anthropicMessagesApi() };
+  }
+  if (endpoint.shape === "responses") {
+    return { id: "openai-responses", streams: openAIResponsesApi() };
+  }
+  return { id: "openai-completions", streams: openAICompletionsApi() };
+}
+
 /** Builds the model descriptor pi-ai needs for a user-supplied endpoint. */
-function modelFor(endpoint: Endpoint): Model<Api> {
-  const api: Api = endpoint.kind === "anthropic" ? "anthropic-messages" : "openai-completions";
+function modelFor(endpoint: Endpoint, api: Api): Model<Api> {
   const model = {
     id: endpoint.model,
     name: endpoint.model,
@@ -70,19 +87,19 @@ function modelFor(endpoint: Endpoint): Model<Api> {
 export async function createAgent(): Promise<AgentHandle> {
   const config = await Settings.load();
   const endpoint = normalize(config);
-  const systemPrompt = (config.prompt ?? "").trim() || SYSTEM_PROMPT;
   if (!endpoint.baseUrl) throw new Error("还没有填写接口地址");
   if (!endpoint.model) throw new Error("还没有填写模型名");
+  const systemPrompt = (config.prompt ?? "").trim() || SYSTEM_PROMPT;
 
   // Requests leave from Go, so no CORS and any header is allowed.
-  const streams = endpoint.kind === "anthropic" ? anthropicMessagesApi() : openAICompletionsApi();
+  const { id: apiId, streams } = apiFor(endpoint);
   const provider = createProvider({
     id: "custom",
     name: "AppleCos endpoint",
     baseUrl: endpoint.baseUrl,
     // The key travels as a per-request option; this resolve only satisfies the contract.
     auth: { apiKey: { name: "API key", resolve: async () => ({ auth: {} }) } },
-    models: [modelFor(endpoint)],
+    models: [modelFor(endpoint, apiId)],
     api: streams,
   });
 

@@ -13,6 +13,11 @@ export interface Config {
   kind: string;
   /** BaseURL is the endpoint root the provider is called at. */
   baseUrl: string;
+  /**
+   * Shape selects the OpenAI API family: "chat" for /v1/chat/completions,
+   * "responses" for /v1/responses. Ignored when Kind is "anthropic".
+   */
+  shape: string;
   /** Model is the model id sent in requests. */
   model: string;
   /** APIKey is stored on disk only, readable by the user alone. */
