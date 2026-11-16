@@ -1270,7 +1270,7 @@ export function mountLorebookManager(
     detailHost.append(
       fieldBlock(
         "触发词",
-        textInput(current.keys.join(", "), (value) => updateEntry(current.id, { keys: splitList(value) }), "雾灯, 码头"),
+        textInput(current.keys.join(", "), (value) => updateEntry(current.id, { keys: splitList(value) }), "例如：登记, 通行牌"),
         HINTS.keys,
       ),
     );
