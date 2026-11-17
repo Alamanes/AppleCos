@@ -86,7 +86,8 @@ export function iconMarkup(name: IconName): string {
 /** Fills every [data-icon] slot with its inline SVG. */
 export function mountIcons(): void {
   for (const slot of document.querySelectorAll<HTMLElement>("[data-icon]")) {
-    const name = slot.dataset.icon as IconName | undefined;
-    if (name && name in ICONS) slot.innerHTML = ICONS[name];
+    const name = slot.dataset.icon;
+    // Own keys only: "constructor" must not resolve to a prototype member.
+    if (name && Object.hasOwn(ICONS, name)) slot.innerHTML = ICONS[name as IconName];
   }
 }

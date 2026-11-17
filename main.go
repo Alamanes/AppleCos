@@ -3,10 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/plugins/fetch"
@@ -37,8 +42,16 @@ type Features struct {
 	Worldbook bool `json:"worldbook"`
 	// Memory enables long-term memory.
 	Memory bool `json:"memory"`
-	// Tools lets the model call the memory tools.
+	// Tools is the older single switch: true while any per-tool flag is on.
 	Tools bool `json:"tools"`
+	// ToolsDice enables the dice tool.
+	ToolsDice bool `json:"toolsDice"`
+	// ToolsTime enables the in-world clock tool.
+	ToolsTime bool `json:"toolsTime"`
+	// ToolsScene enables the scene tool.
+	ToolsScene bool `json:"toolsScene"`
+	// ToolsLore enables the world info lookup tool.
+	ToolsLore bool `json:"toolsLore"`
 	// DeveloperMode shows trigger logs and raw payloads.
 	DeveloperMode bool `json:"developerMode"`
 }
@@ -89,6 +102,10 @@ var defaultFeatures = Features{
 	Worldbook:     true,
 	Memory:        true,
 	Tools:         true,
+	ToolsDice:     true,
+	ToolsTime:     true,
+	ToolsScene:    true,
+	ToolsLore:     true,
 	DeveloperMode: false,
 }
 
@@ -120,24 +137,29 @@ func (Settings) Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	data, err := readLimited(path, maxConfigBytes)
+	if errors.Is(err, fs.ErrNotExist) {
 		return defaults, nil
 	}
 	if err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("配置读取失败：%w", publicError(err))
 	}
 	cfg := defaults
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, err
+		// A hand edit or a crash left the file unreadable: keep it, so the next
+		// save cannot erase the endpoint, the prompt and the key it held.
+		keepCorruptConfig(path, err)
+		return defaults, nil
 	}
 	var probe map[string]json.RawMessage
 	if json.Unmarshal(data, &probe) == nil {
 		if _, ok := probe["confirm"]; !ok {
 			cfg.Confirm = true
 		}
-		if _, ok := probe["features"]; !ok {
+		if features, ok := probe["features"]; !ok {
 			cfg.Features = defaultFeatures
+		} else {
+			applyToolFallbacks(&cfg.Features, features)
 		}
 	}
 	normalizeConfig(&cfg)
@@ -156,10 +178,23 @@ func (Settings) Save(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	// The file holds the API key: write it through the atomic path, which also
+	// applies 0600 to the replacement instead of keeping the old mode.
+	if err := writeFileAtomic(path, data, filePerm); err != nil {
+		return fmt.Errorf("保存配置失败：%w", publicError(err))
 	}
-	return os.WriteFile(path, data, 0o600)
+	return nil
+}
+
+// keepCorruptConfig moves a configuration file this build cannot parse aside.
+func keepCorruptConfig(path string, cause error) {
+	log.Printf("config: unreadable: %v", cause)
+	target := path + ".corrupt-" + time.Now().Format("20060102-150405")
+	if err := os.Rename(path, target); err != nil {
+		log.Printf("config: keeping the unreadable file failed: %v", err)
+		return
+	}
+	log.Printf("config: kept an unreadable file as %s", target)
 }
 
 // normalizeConfig repairs values an older config file or a hand edit left
@@ -181,6 +216,40 @@ func normalizeConfig(cfg *Config) {
 	cfg.ContextWindow = clampInt(cfg.ContextWindow, 2048, 2000000, 128000)
 	cfg.BudgetPct = clampInt(cfg.BudgetPct, 5, 100, 25)
 	cfg.TriggerBudget = clampInt(cfg.TriggerBudget, 100, 200000, 2000)
+}
+
+// applyToolFallbacks fills the per-tool switches a config file predates. A file
+// with none of them can only say whether any tool was on; with some of them,
+// the rest read as enabled, which is how the page shows a partial set.
+func applyToolFallbacks(features *Features, raw json.RawMessage) {
+	var present map[string]json.RawMessage
+	if json.Unmarshal(raw, &present) != nil {
+		// Not an object: treat it as a file without any per-tool switch.
+		present = nil
+	}
+	known := false
+	for _, key := range []string{"toolsDice", "toolsTime", "toolsScene", "toolsLore"} {
+		if _, ok := present[key]; ok {
+			known = true
+			break
+		}
+	}
+	fallback := features.Tools
+	if known {
+		fallback = true
+	}
+	if _, ok := present["toolsDice"]; !ok {
+		features.ToolsDice = fallback
+	}
+	if _, ok := present["toolsTime"]; !ok {
+		features.ToolsTime = fallback
+	}
+	if _, ok := present["toolsScene"]; !ok {
+		features.ToolsScene = fallback
+	}
+	if _, ok := present["toolsLore"]; !ok {
+		features.ToolsLore = fallback
+	}
 }
 
 // normalizeReasoning keeps an unknown thinking level on "off", which is what
@@ -239,6 +308,10 @@ func (Shell) Quit() {
 	mygo.App.Quit()
 }
 
+// windowColor accepts the color syntax the window layer understands: a hex
+// color, or a light/dark pair of them.
+var windowColor = regexp.MustCompile("^(#[0-9a-fA-F]{3,8}|light-dark[(] *#[0-9a-fA-F]{3,8} *, *#[0-9a-fA-F]{3,8} *[)])$")
+
 // SetWindowBackground sets the color painted behind the page, in the syntax
 // of the window options, such as "light-dark(#f5f7fb, #12151f)".
 func (Shell) SetWindowBackground(color string) error {
@@ -246,13 +319,61 @@ func (Shell) SetWindowBackground(color string) error {
 	if window == nil {
 		return errors.New("窗口还没有就绪")
 	}
-	return window.SetBackgroundColor(color)
+	trimmed := strings.TrimSpace(color)
+	if !windowColor.MatchString(trimmed) {
+		return fmt.Errorf("不支持的颜色值：%q", color)
+	}
+	return window.SetBackgroundColor(trimmed)
+}
+
+// beforeQuit tells the page that the app is going away, so it can finish the
+// saves it has queued. A page that does not listen only costs the grace
+// period.
+var beforeQuit = mygo.NewEvent[string]("app:before-quit")
+
+// quitGrace is how long the window waits for the page's save chain.
+const quitGrace = 300 * time.Millisecond
+
+// quitting marks a close that already asked the page to flush.
+var quitting atomic.Bool
+
+// watchQuit flushes the page before the window closes. The second close of the
+// same exit passes straight through.
+func watchQuit(window *mygo.Window) {
+	window.OnClose(func(e *mygo.CloseEvent) {
+		if quitting.Load() {
+			return
+		}
+		e.PreventDefault()
+		_ = beforeQuit.Emit(window, "close")
+		quitting.Store(true)
+		go func() {
+			time.Sleep(quitGrace)
+			window.Close()
+		}()
+	})
+	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		// The operating system ends the session on its own terms; do not hold it.
+		if e.SessionEnding || quitting.Load() {
+			return
+		}
+		e.PreventDefault()
+		_ = beforeQuit.Emit(window, "quit")
+		quitting.Store(true)
+		go func() {
+			time.Sleep(quitGrace)
+			mygo.App.Quit()
+		}()
+	})
 }
 
 func main() {
 	// Model requests leave from Go: no CORS, any header, streamed both ways.
 	mygo.Use(fetch.Plugin)
 	mygo.Bind(Settings{}, Library{}, Sessions{}, Shell{})
+
+	// Old deletions expire so the recovery folder cannot grow without limit.
+	pruneTrash()
 
 	mygo.App.WhenReady(func() {
 		window := mygo.NewWindow(mygo.WindowOptions{
@@ -268,6 +389,7 @@ func main() {
 			URL:           "/",
 		})
 		mainWindow.Store(window)
+		watchQuit(window)
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

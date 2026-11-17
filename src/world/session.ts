@@ -203,6 +203,7 @@ function copySnapshot(snapshot: TurnSnapshot): TurnSnapshot {
     messageIds: [...snapshot.messageIds],
     scene: { ...snapshot.scene },
     memory: { facts: snapshot.memory.facts.map(copyFact) },
+    overlays: snapshot.overlays ? copyOverlays(snapshot.overlays) : undefined,
     lore: copyRuntime(snapshot.lore),
     loreLog: copyLog(snapshot.loreLog),
   };
@@ -279,6 +280,13 @@ export function updateOverlay(
   return next;
 }
 
+/** Copies every overlay, so a snapshot never shares arrays with the live state. */
+function copyOverlays(overlays: Record<string, CharacterOverlay>): Record<string, CharacterOverlay> {
+  const out: Record<string, CharacterOverlay> = {};
+  for (const [id, overlay] of Object.entries(overlays)) out[id] = copyOverlay(overlay);
+  return out;
+}
+
 /** Stores the current state as this turn's snapshot, replacing an old one. */
 export function snapshotTurn(session: SessionState, summary = "", now = Date.now()): SessionState {
   const next = cloneSession(session);
@@ -287,9 +295,14 @@ export function snapshotTurn(session: SessionState, summary = "", now = Date.now
     turn: session.meta.turn,
     createdAt: now,
     summary,
-    messageIds: session.messages.map((message) => message.id),
+    // Messages are append-only inside a scene, so a count is enough to cut the
+    // transcript back to this turn; ids would grow with every snapshot.
+    messageIds: [],
+    messageCount: session.messages.length,
     scene: { ...session.scene },
     memory: { facts: session.memory.facts.map(copyFact) },
+    // Affection and live notes belong to the turn, so a rewind rolls them back.
+    overlays: copyOverlays(session.overlays),
     lore: copyRuntime(session.lore),
     loreLog: copyLog(session.loreLog),
   };
@@ -311,16 +324,22 @@ export function pruneSnapshots(session: SessionState, keep: number): SessionStat
 
 function fromSnapshot(session: SessionState, snapshot: TurnSnapshot, now: number): SessionState {
   const next = cloneSession(session);
+  const hasIds = snapshot.messageIds.length > 0;
   const wanted = new Set(snapshot.messageIds);
-  const kept = session.messages.filter((message) => wanted.has(message.id));
-  // Stored ids can be missing when the state and transcript came from
-  // different files; fall back to the turn number in that case.
+  const kept = hasIds
+    ? session.messages.filter((message) => wanted.has(message.id))
+    : session.messages.slice(0, Math.max(0, snapshot.messageCount ?? 0));
+  const expected = hasIds ? snapshot.messageIds.length : (snapshot.messageCount ?? 0);
+  // Stored ids or counts can be out of step when the state and the transcript
+  // came from different files; fall back to the turn number in that case.
   next.messages =
-    kept.length > 0 || snapshot.messageIds.length === 0
+    kept.length > 0 || expected === 0
       ? kept
       : session.messages.filter((message) => message.turn <= snapshot.turn);
   next.memory = { facts: snapshot.memory.facts.map(copyFact) };
   next.scene = { ...snapshot.scene };
+  // Snapshots from before overlays were recorded keep the live character state.
+  if (snapshot.overlays) next.overlays = copyOverlays(snapshot.overlays);
   next.lore = copyRuntime(snapshot.lore);
   next.loreLog = copyLog(snapshot.loreLog);
   next.meta.turn = snapshot.turn;
@@ -484,21 +503,58 @@ export function restoreMessage(raw: unknown, fallbackTurn = 0): WorldMessage | n
   };
 }
 
+/** Reads one stored overlay, keeping the optional death marks. */
+function readOverlay(cardId: string, raw: unknown, now: number): CharacterOverlay {
+  const item = asDict(raw);
+  const overlay: CharacterOverlay = {
+    cardId,
+    affinity: numOf(item.affinity, 0),
+    tags: stringsOf(item.tags),
+    notes: stringsOf(item.notes),
+    relationship: textOf(item.relationship),
+    updatedAt: numOf(item.updatedAt, now),
+  };
+  // Death marks are optional: older saves simply lack them.
+  if (item.deceased === true) {
+    overlay.deceased = true;
+    const cause = textOf(item.deathCause);
+    if (cause !== "") overlay.deathCause = cause;
+    const note = textOf(item.deathNote);
+    if (note !== "") overlay.deathNote = note;
+    overlay.diedAtTurn = numOf(item.diedAtTurn, 0);
+  }
+  return overlay;
+}
+
+/** Reads a stored overlay map; unusable entries are dropped. */
+function readOverlays(raw: unknown, now: number): Record<string, CharacterOverlay> {
+  const out: Record<string, CharacterOverlay> = {};
+  for (const [cardId, value] of Object.entries(asDict(raw))) {
+    out[cardId] = readOverlay(cardId, value, now);
+  }
+  return out;
+}
+
 function normalizeSnapshot(raw: unknown): TurnSnapshot | null {
   if (!isDict(raw)) return null;
   const turn = numOf(raw.turn, 0);
+  const createdAt = numOf(raw.createdAt, Date.now());
   return {
     id: textOf(raw.id) || `turn_${turn}`,
     turn,
-    createdAt: numOf(raw.createdAt, Date.now()),
+    createdAt,
     summary: textOf(raw.summary),
     messageIds: stringsOf(raw.messageIds),
+    messageCount: numOf(raw.messageCount, 0),
     scene: {
       location: textOf(asDict(raw.scene).location),
       time: textOf(asDict(raw.scene).time),
       summary: textOf(asDict(raw.scene).summary),
     },
-    memory: normalizeMemory(raw.memory),
+    // Absent on slimmed saves: restoreSession fills it from the earlier snapshot.
+    memory: isDict(raw.memory) ? normalizeMemory(raw.memory) : (undefined as unknown as MemoryState),
+    // Absent in saves written before snapshots carried character state.
+    overlays: isDict(raw.overlays) ? readOverlays(raw.overlays, createdAt) : undefined,
     lore: normalizeRuntime(raw.lore),
     loreLog: normalizeLog(raw.loreLog),
   };
@@ -521,27 +577,7 @@ export function restoreSession(raw: unknown, world: World): SessionState {
 
   const overlays: Record<string, CharacterOverlay> = {};
   for (const cardId of cast) overlays[cardId] = createOverlay(cardId, now);
-  for (const [cardId, value] of Object.entries(asDict(record.overlays))) {
-    const item = asDict(value);
-    const overlay: CharacterOverlay = {
-      cardId,
-      affinity: numOf(item.affinity, 0),
-      tags: stringsOf(item.tags),
-      notes: stringsOf(item.notes),
-      relationship: textOf(item.relationship),
-      updatedAt: numOf(item.updatedAt, now),
-    };
-    // Death marks are optional: older saves simply lack them.
-    if (item.deceased === true) {
-      overlay.deceased = true;
-      const cause = textOf(item.deathCause);
-      if (cause !== "") overlay.deathCause = cause;
-      const note = textOf(item.deathNote);
-      if (note !== "") overlay.deathNote = note;
-      overlay.diedAtTurn = numOf(item.diedAtTurn, 0);
-    }
-    overlays[cardId] = overlay;
-  }
+  Object.assign(overlays, readOverlays(record.overlays, now));
 
   const turn = numOf(metaRaw.turn, 0);
   const messages: WorldMessage[] = [];
@@ -556,6 +592,14 @@ export function restoreSession(raw: unknown, world: World): SessionState {
     if (snapshot) turns.push(snapshot);
   }
   turns.sort((left, right) => left.turn - right.turn);
+  // A slimmed save omits a snapshot's memory when it matched the previous one;
+  // put it back so every in-memory snapshot carries its full state.
+  let carried: MemoryState | null = null;
+  for (const snapshot of turns) {
+    if (snapshot.memory) carried = snapshot.memory;
+    else if (carried) snapshot.memory = { facts: carried.facts.map(copyFact) };
+    if (!snapshot.memory) snapshot.memory = { facts: [] };
+  }
 
   return {
     version: SESSION_VERSION,
@@ -597,4 +641,106 @@ export function hydrateSession(
   const session = restoreSession(state, world);
   if (messages.length === 0) return session;
   return { ...session, messages: messages.map((message) => ({ ...message })) };
+}
+
+/* -------------------------------------------------------------------------
+   Stored shapes: session.json stays small, the transcript owns the text
+   ------------------------------------------------------------------------- */
+
+/** Header of one projected line; its text lives in messages.jsonl. */
+export interface MessageProjection {
+  id: string;
+  role: WorldMessageRole;
+  speaker: string;
+  turn: number;
+  timestamp: number;
+  hidden: boolean;
+  cardId: string;
+}
+
+/** Drops the text and keeps only what the transcript cannot carry. */
+export function projectMessages(messages: readonly WorldMessage[]): MessageProjection[] {
+  return messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    speaker: message.speaker,
+    turn: message.turn,
+    timestamp: message.timestamp,
+    hidden: message.hidden,
+    cardId: message.cardId,
+  }));
+}
+
+/** Reads stored headers; empty for saves that predate them. */
+export function readProjections(raw: unknown): MessageProjection[] {
+  const record = asDict(raw);
+  const list = Array.isArray(record.projection) ? record.projection : [];
+  const out: MessageProjection[] = [];
+  for (const item of list) {
+    if (!isDict(item)) continue;
+    out.push({
+      id: textOf(item.id),
+      role: roleOf(item.role),
+      speaker: textOf(item.speaker),
+      turn: numOf(item.turn, 0),
+      timestamp: numOf(item.timestamp, 0),
+      hidden: item.hidden === true,
+      cardId: textOf(item.cardId),
+    });
+  }
+  return out;
+}
+
+/**
+ * Rebuilds world lines from the transcript while keeping the stored ids and
+ * turns, so snapshots and rewind keep working without storing text twice.
+ */
+export function applyProjections(
+  lines: readonly WorldMessage[],
+  stored: readonly MessageProjection[],
+): WorldMessage[] {
+  if (stored.length === 0) return [...lines];
+  return lines.map((line, index) => {
+    const meta = stored[index];
+    if (!meta) return line;
+    return {
+      ...line,
+      id: meta.id || line.id,
+      speaker: meta.speaker || line.speaker,
+      turn: meta.turn,
+      timestamp: meta.timestamp || line.timestamp,
+      hidden: meta.hidden,
+      cardId: meta.cardId,
+    };
+  });
+}
+
+/** Whether two memory snapshots hold the same facts. */
+function sameMemory(left: MemoryState, right: MemoryState): boolean {
+  if (left.facts.length !== right.facts.length) return false;
+  return JSON.stringify(left.facts) === JSON.stringify(right.facts);
+}
+
+/**
+ * Snapshot list as it goes to disk: message ids become a count, and memory that
+ * did not change since the previous snapshot is left out. Both are restored on
+ * load, so the in-memory shape never changes.
+ */
+export function slimSnapshots(turns: readonly TurnSnapshot[]): TurnSnapshot[] {
+  const out: TurnSnapshot[] = [];
+  let previous: MemoryState | null = null;
+  for (const snapshot of turns) {
+    const memory = snapshot.memory;
+    const unchanged = previous !== null && sameMemory(previous, memory);
+    if (memory) previous = memory;
+    out.push({
+      ...snapshot,
+      messageCount:
+        snapshot.messageIds.length > 0 ? snapshot.messageIds.length : snapshot.messageCount ?? 0,
+      messageIds: [],
+      // Left undefined so JSON drops the key and the earlier value is reused.
+      memory: (unchanged ? undefined : memory) as unknown as MemoryState,
+    });
+  }
+  return out;
 }

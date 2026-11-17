@@ -71,7 +71,8 @@
           <p class="empty-hint">在下方写下第一句台词，回车就开演。</p>
         </div>
 
-        <div id="chat" class="script" aria-live="polite"></div>
+        <!-- Streaming rewrites text per token, so the live region is the announcer. -->
+        <div id="chat" class="script" role="log" aria-live="off" aria-relevant="additions"></div>
 
         <form id="composer" class="composer">
           <div class="box">
@@ -386,7 +387,7 @@
     </div>
 
     <!-- Settings -->
-    <dialog id="settings" class="sheet">
+    <dialog id="settings" class="sheet" aria-labelledby="pane-title">
       <div class="settings">
         <nav class="settings-nav" aria-label="设置分类">
           <button type="button" class="nav-item" data-pane="appearance">外观</button>
@@ -813,7 +814,7 @@
     </dialog>
 
     <!-- Editor: world / character / lore / memory -->
-    <dialog id="editor" class="sheet editor">
+    <dialog id="editor" class="sheet editor" aria-labelledby="editor-title">
       <div class="editor-shell">
         <header class="editor-head">
           <span class="editor-kind" id="editor-kind">世界</span>
@@ -860,7 +861,7 @@
       </div>
     </dialog>
 
-    <dialog id="worlds" class="sheet worlds">
+    <dialog id="worlds" class="sheet worlds" aria-labelledby="worlds-title">
       <div class="worlds-shell">
         <header class="worlds-head">
           <span class="editor-kind">资料库</span>

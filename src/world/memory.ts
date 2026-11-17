@@ -61,7 +61,20 @@ export function tokenize(text: string): string[] {
   return [...out];
 }
 
-/** Adds one fact and returns the new memory plus the fact. */
+/** How much two facts overlap; used to update instead of duplicating. */
+function textOverlap(left: string, right: string): number {
+  const a = new Set(tokenize(left));
+  if (a.size === 0) return 0;
+  const b = new Set(tokenize(right));
+  let shared = 0;
+  for (const term of b) if (a.has(term)) shared += 1;
+  return shared / Math.max(a.size, b.size);
+}
+
+/**
+ * Adds one fact. A restatement of a fact already known for the same owner
+ * updates it instead of piling up a near duplicate in the prompt.
+ */
 export function rememberFact(
   memory: MemoryState,
   tier: MemoryTier,
@@ -69,13 +82,39 @@ export function rememberFact(
   options: MemoryWriteOptions = {},
 ): { memory: MemoryState; fact: MemoryFact } {
   const now = options.now ?? Date.now();
+  const body = text.trim();
+  const owner = options.owner ?? "";
+  const importance = clampImportance(options.importance ?? 0.5);
+  const incoming = options.keywords ? [...options.keywords] : [];
+
+  const existing = memory.facts.find(
+    (fact) =>
+      fact.tier === tier &&
+      fact.owner === owner &&
+      fact.softenedAt === null &&
+      (fact.text === body || textOverlap(fact.text, body) >= 0.8),
+  );
+  if (existing) {
+    const fact: MemoryFact = {
+      ...existing,
+      // The newer wording wins; the older keywords stay searchable.
+      text: body,
+      keywords: [...new Set([...existing.keywords, ...incoming])].slice(0, 24),
+      importance: Math.max(existing.importance, importance),
+      kind: options.kind ?? existing.kind,
+      updatedAt: now,
+      lastUsedTurn: options.turn ?? existing.lastUsedTurn,
+    };
+    return { memory: { facts: memory.facts.map((item) => (item.id === fact.id ? fact : item)) }, fact };
+  }
+
   const fact: MemoryFact = {
     id: createId("mem"),
     tier,
-    owner: options.owner ?? "",
-    text: text.trim(),
-    keywords: options.keywords ? [...options.keywords] : [],
-    importance: clampImportance(options.importance ?? 0.5),
+    owner,
+    text: body,
+    keywords: incoming,
+    importance,
     kind: options.kind ?? "event",
     createdAt: now,
     updatedAt: now,
@@ -223,13 +262,24 @@ export function groupMemory(
     });
 }
 
+/** Summary text plus how many facts the budget left out. */
+export interface MemorySummary {
+  text: string;
+  /** Facts that exist but did not fit; callers can tell the model they exist. */
+  omitted: number;
+}
+
 /** Renders layered memory for the prompt inside a character budget. */
-export function summarizeMemory(memory: MemoryState, options: MemorySummaryOptions = {}): string {
+export function summarizeMemoryReport(
+  memory: MemoryState,
+  options: MemorySummaryOptions = {},
+): MemorySummary {
   const budget = options.budgetChars ?? 1600;
-  if (budget <= 0) return "";
+  if (budget <= 0) return { text: "", omitted: 0 };
   const groups = groupMemory(memory, options);
   const blocks: string[] = [];
   let used = 0;
+  let shown = 0;
 
   for (const group of groups) {
     const heading =
@@ -249,10 +299,17 @@ export function summarizeMemory(memory: MemoryState, options: MemorySummaryOptio
     const block = `[${heading}]\n${lines.join("\n")}`;
     if (used + block.length > budget && blocks.length > 0) continue;
     blocks.push(block);
+    shown += lines.length;
     used += block.length;
   }
 
-  return blocks.join("\n\n");
+  const total = groups.reduce((sum, group) => sum + group.facts.length, 0);
+  return { text: blocks.join("\n\n"), omitted: Math.max(0, total - shown) };
+}
+
+/** Renders layered memory for the prompt inside a character budget. */
+export function summarizeMemory(memory: MemoryState, options: MemorySummaryOptions = {}): string {
+  return summarizeMemoryReport(memory, options).text;
 }
 
 /** Character count of everything the summary could show. */

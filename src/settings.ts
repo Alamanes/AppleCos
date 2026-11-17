@@ -172,7 +172,8 @@ export type Library = Record<EditorKind, Entry[]>;
 const EMPTY_LIBRARY: Library = { world: [], character: [], lore: [], memory: [], player: [] };
 
 let library: Library = { world: [], character: [], lore: [], memory: [], player: [] };
-let libraryBusy = false;
+/** In-flight library read; concurrent callers wait on the same promise. */
+let libraryTask: Promise<void> | null = null;
 let activeWorldId = "";
 
 /** The live session owns memory entries; the runtime registers this bridge. */
@@ -199,20 +200,24 @@ export function useMemoryEntries(list: Entry[]): void {
 
 /** Reloads the four editor lists from the Go library. */
 export async function refreshLibrary(): Promise<void> {
-  if (libraryBusy) return;
-  libraryBusy = true;
-  try {
-    const memory = memoryStore ? memoryStore.list() : library.memory;
-    // The player card lives inside the world file, so keep the last read copy.
-    library = { ...(await loadLibrary(memory)), player: library.player };
-    refreshLibraryCounts();
-    renderEditorIfOpen();
-    renderWorldList();
-  } catch (error) {
-    setEditorStatus("读取资料库失败：" + String(error), true);
-  } finally {
-    libraryBusy = false;
-  }
+  // A caller that arrives during a read joins it instead of seeing a stale cache.
+  if (libraryTask) return libraryTask;
+  const task = (async () => {
+    try {
+      const memory = memoryStore ? memoryStore.list() : library.memory;
+      // The player card lives inside the world file, so keep the last read copy.
+      library = { ...(await loadLibrary(memory)), player: library.player };
+      refreshLibraryCounts();
+      renderEditorIfOpen();
+      renderWorldList();
+    } catch (error) {
+      setEditorStatus("读取资料库失败：" + String(error), true);
+    } finally {
+      libraryTask = null;
+    }
+  })();
+  libraryTask = task;
+  return task;
 }
 
 const KIND_META: Record<EditorKind, { label: string; noun: string }> = {
@@ -346,6 +351,14 @@ export function readFlags(): Flags {
   return { ...flags, tools: { ...flags.tools }, budget: { ...flags.budget } };
 }
 
+/**
+ * The saved configuration, for the runtime that rebuilds the kernel agent.
+ * Read in-process instead of being broadcast, so the key stays out of events.
+ */
+export function readConfig(): Config {
+  return { ...config, features: { ...config.features } };
+}
+
 /** Mirrors a runtime developer-mode change on the setting and the banner. */
 export function setDevFlag(on: boolean): void {
   if (flags.devMode === on) return;
@@ -407,6 +420,10 @@ const DEFAULT_FEATURES: Features = {
   worldbook: true,
   memory: true,
   tools: true,
+  toolsDice: true,
+  toolsTime: true,
+  toolsScene: true,
+  toolsLore: true,
   developerMode: false,
 };
 
@@ -431,8 +448,19 @@ let shape: Shape = "chat";
 let configTimer: number | undefined;
 let saveChain: Promise<void> = Promise.resolve();
 
+/**
+ * Features plus the per-tool switches. Go ignores the extra keys until its
+ * Features struct carries them, so the codec stays compatible either way.
+ */
+type FeaturesWithTools = Features & {
+  toolsDice?: boolean;
+  toolsTime?: boolean;
+  toolsScene?: boolean;
+  toolsLore?: boolean;
+};
+
 /** Flags mapped onto the Features struct Go persists. */
-function featuresFromFlags(source: Flags): Features {
+function featuresFromFlags(source: Flags): FeaturesWithTools {
   return {
     worldPanel: source.worldPanel,
     worldClock: source.worldClock,
@@ -443,17 +471,41 @@ function featuresFromFlags(source: Flags): Features {
     showLatency: source.showLatency,
     worldbook: source.worldbook,
     memory: source.memory,
+    // Kept for older hosts: true while any tool is on.
     tools: source.tools.dice || source.tools.time || source.tools.scene || source.tools.lore,
+    toolsDice: source.tools.dice,
+    toolsTime: source.tools.time,
+    toolsScene: source.tools.scene,
+    toolsLore: source.tools.lore,
     developerMode: source.devMode,
   };
+}
+
+/**
+ * Restores the tool switches. A config without the per-tool keys can only say
+ * whether any tool was on, so it falls back to that single bit.
+ */
+function toolsFromFeatures(features: FeaturesWithTools): ToolFlags {
+  const keys = [features.toolsDice, features.toolsTime, features.toolsScene, features.toolsLore];
+  if (keys.some((value) => typeof value === "boolean")) {
+    return {
+      dice: features.toolsDice ?? true,
+      time: features.toolsTime ?? true,
+      scene: features.toolsScene ?? true,
+      lore: features.toolsLore ?? true,
+    };
+  }
+  const all = features.tools !== false;
+  return { dice: all, time: all, scene: all, lore: all };
 }
 
 /** Pulls a loaded config back into the local flag model. */
 function adoptConfig(cfg: Config): void {
   config = cfg;
-  const features = cfg.features ?? DEFAULT_FEATURES;
+  const features = (cfg.features ?? DEFAULT_FEATURES) as FeaturesWithTools;
   flags = mergeFlags({
     ...flags,
+    tools: toolsFromFeatures(features),
     worldPanel: features.worldPanel,
     worldClock: features.worldClock,
     scriptMode: features.scriptMode,
@@ -538,7 +590,9 @@ async function saveConfig(reason: ConfigReason): Promise<void> {
   try {
     await Settings.save(payload);
     markSaved();
-    announce<Config & { reason: ConfigReason }>("applecos:config", { ...payload, reason });
+    // The event only signals that the file changed; the runtime reads the
+    // saved config in-process, so the API key is not broadcast on the document.
+    announce<{ reason: ConfigReason }>("applecos:config", { reason });
   } catch (error) {
     setSaveState("error", `保存失败：${String(error)}`);
   }
@@ -660,7 +714,10 @@ let activePane: Pane = "appearance";
 function showPane(pane: Pane): void {
   activePane = pane;
   for (const button of $$<HTMLButtonElement>(".nav-item")) {
-    button.classList.toggle("selected", button.dataset.pane === pane);
+    const active = button.dataset.pane === pane;
+    button.classList.toggle("selected", active);
+    // Screen readers need the current pane, not just a colour.
+    button.setAttribute("aria-current", active ? "page" : "false");
   }
   for (const section of $$<HTMLElement>(".pane")) {
     const active = section.dataset.pane === pane;
@@ -707,6 +764,27 @@ function renderThemeCards(choice: ThemeChoice): void {
   if (about) about.textContent = themeMeta(resolvePalette(choice)).name;
 }
 
+/**
+ * First-paint mirror of the display flags. index.html reads it before the
+ * stylesheet loads, so a hidden panel or the script layout never flashes in.
+ */
+function writeFlagsMirror(): void {
+  try {
+    localStorage.setItem(
+      "applecos.flags",
+      JSON.stringify({
+        scriptMode: flags.scriptMode,
+        worldPanel: flags.worldPanel,
+        worldClock: flags.worldClock,
+        reduceMotion: flags.reduceMotion,
+        devMode: flags.devMode,
+      }),
+    );
+  } catch {
+    // Private mode or a full disk: the mirror only avoids a first-paint flash.
+  }
+}
+
 function applyFlags(): void {
   const root = document.documentElement;
   root.dataset.flagWorld = flags.worldPanel ? "on" : "off";
@@ -715,6 +793,7 @@ function applyFlags(): void {
   root.dataset.flagMotion = flags.reduceMotion ? "on" : "off";
   root.dataset.flagDev = flags.devMode ? "on" : "off";
   root.dataset.flagTypewriter = flags.typewriter ? "on" : "off";
+  writeFlagsMirror();
   // Turning the world panel off also drops its tab; the active pane falls back.
   activateRailTab(railTab, false);
 }
@@ -991,7 +1070,12 @@ function nextSessionIndex(): number {
 
 function selectSession(id: string): void {
   if (handlers.sessions) {
-    void handlers.sessions.select(id);
+    // The runtime serialises the switch; the list stays inert until it settles.
+    const list = document.getElementById("session-list");
+    list?.setAttribute("aria-busy", "true");
+    void Promise.resolve(handlers.sessions.select(id))
+      .catch(() => undefined)
+      .finally(() => list?.removeAttribute("aria-busy"));
     return;
   }
   const session = sessions.find((item) => item.id === id);
@@ -1067,6 +1151,7 @@ function icon(path: string): SVGSVGElement {
 
 function sessionItem(session: SessionMeta): HTMLLIElement {
   const item = document.createElement("li");
+  item.className = "session-row";
   item.dataset.id = session.id;
 
   const button = document.createElement("button");
@@ -1094,6 +1179,7 @@ function sessionItem(session: SessionMeta): HTMLLIElement {
 
   const tools = document.createElement("span");
   tools.className = "session-tools";
+  // aria-label would nest inside the row button; the label stays on the buttons.
 
   const rename = document.createElement("button");
   rename.type = "button";
@@ -1116,9 +1202,11 @@ function sessionItem(session: SessionMeta): HTMLLIElement {
   });
 
   tools.append(rename, remove);
-  button.append(scene, time, preview, tools);
+  button.append(scene, time, preview);
   button.addEventListener("click", () => selectSession(session.id));
-  item.append(button);
+  // Siblings, not children: a button inside a button is invalid markup and
+  // hides both action names from assistive tech.
+  item.append(button, tools);
   return item;
 }
 
@@ -1135,6 +1223,8 @@ function startRename(item: HTMLLIElement, session: SessionMeta): void {
     renameSession(session.id, input.value);
   };
   input.addEventListener("keydown", (event) => {
+    // An IME uses Enter to accept a candidate; that keystroke is not a commit.
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === "Enter") {
       event.preventDefault();
       commit();
@@ -1679,6 +1769,8 @@ function mountLoreEditor(id: string): void {
     onStatus: (message, error = false) => setEditorStatus(message, error),
     onDirty: () => setEditorStatus("有未保存的改动，点“保存并返回”写入资料库。"),
     worldbookEnabled: () => readFlags().worldbook,
+    // Trial runs read the scene the player is looking at, not a list entry.
+    currentSession: () => activeSessionId,
   });
   loreManager = created;
   void created.ready.then(() => {
@@ -1700,13 +1792,40 @@ function editorButton(label: string, action: () => void | Promise<void>): HTMLBu
   return button;
 }
 
-function openEditor(kind: EditorKind, id?: string): void {
+/** Placeholder shown while a cold-start library read is still running. */
+function showEditorLoading(kind: EditorKind): void {
+  $("#editor-kind").textContent = KIND_META[kind].label;
+  $("#editor-title").textContent = "正在读取资料库…";
+  $<HTMLButtonElement>("#editor-delete").hidden = true;
+  const host = $("#editor-form");
+  host.replaceChildren();
+  // A detached block must not keep refreshing itself.
+  affinityRefresh = null;
+  const note = document.createElement("p");
+  note.className = "editor-note";
+  note.textContent = "正在读取资料库…";
+  host.append(note);
+  setEditorStatus("正在读取资料库…");
+}
+
+/**
+ * Opens one editor. A click that lands before the first library read must wait
+ * for it, otherwise its target looks missing and the editor falls back to a
+ * list that says there is no data.
+ */
+async function openEditor(kind: EditorKind, id?: string): Promise<void> {
   if (kind === "player") {
     void openPlayerEditor();
     return;
   }
   editorKind = kind;
   const dialog = $<HTMLDialogElement>("#editor");
+  const missing = id !== undefined && !findEntry(kind, id);
+  if (library[kind].length === 0 || missing) {
+    if (!dialog.open) dialog.showModal();
+    showEditorLoading(kind);
+    await refreshLibrary();
+  }
   if (kind === "world") {
     const target = id ?? activeWorldId ?? library.world[0]?.id ?? "";
     if (target && findEntry("world", target)) openEditorForm("world", target);
@@ -1717,7 +1836,6 @@ function openEditor(kind: EditorKind, id?: string): void {
     openEditorList(kind);
   }
   if (!dialog.open) dialog.showModal();
-  if (library[kind].length === 0) void refreshLibrary();
 }
 
 /**
@@ -1728,7 +1846,13 @@ async function openPlayerEditor(): Promise<void> {
   const dialog = $<HTMLDialogElement>("#editor");
   editorKind = "player";
   if (!dialog.open) dialog.showModal();
-  const worldId = activeWorldId || library.world[0]?.id || "";
+  let worldId = activeWorldId || library.world[0]?.id || "";
+  if (!worldId && library.world.length === 0) {
+    // A click before the first library read must not claim there is no world.
+    setEditorStatus("正在读取资料库…");
+    await refreshLibrary();
+    worldId = activeWorldId || library.world[0]?.id || "";
+  }
   if (!worldId) {
     // The card is stored in the world file, so one must exist first.
     $("#editor-form").replaceChildren();
@@ -1819,6 +1943,102 @@ function appendEditorTools(host: HTMLElement, kind: EditorKind, id: string): voi
   host.append(row);
 }
 
+/* Inline decision bar of the editor footer: destructive steps ask here. */
+
+interface EditorChoice {
+  message: string;
+  confirmLabel: string;
+  onConfirm: () => void | Promise<void>;
+  /** Optional second action, e.g. "放弃改动" next to cancel. */
+  altLabel?: string;
+  onAlt?: () => void | Promise<void>;
+}
+
+let editorChoiceBar: HTMLElement | null = null;
+
+function hideEditorChoice(): void {
+  editorChoiceBar?.remove();
+  editorChoiceBar = null;
+}
+
+/** Puts a decision in the footer; the old one is replaced, never stacked. */
+function showEditorChoice(choice: EditorChoice): void {
+  hideEditorChoice();
+  const foot = document.querySelector<HTMLElement>("#editor .editor-foot");
+  if (!foot) return;
+
+  const bar = document.createElement("div");
+  bar.className = "editor-confirm";
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "需要确认");
+
+  const note = document.createElement("span");
+  note.className = "editor-confirm-note";
+  note.textContent = choice.message;
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "ghost";
+  cancel.textContent = "取消";
+  cancel.addEventListener("click", () => {
+    hideEditorChoice();
+    setEditorStatus("");
+  });
+
+  const alt = document.createElement("button");
+  alt.type = "button";
+  alt.className = "ghost danger-ghost";
+  alt.textContent = choice.altLabel ?? "";
+  alt.hidden = !choice.altLabel;
+  alt.addEventListener("click", () => {
+    hideEditorChoice();
+    void choice.onAlt?.();
+  });
+
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "primary";
+  confirm.textContent = choice.confirmLabel;
+  confirm.addEventListener("click", () => {
+    hideEditorChoice();
+    void choice.onConfirm();
+  });
+
+  bar.append(note, cancel, alt, confirm);
+  foot.prepend(bar);
+  editorChoiceBar = bar;
+  confirm.focus();
+}
+
+/** Runs next once any unsaved world book work is settled. */
+function guardUnsaved(next: () => void): void {
+  const dirty = loreManager?.isDirty() ?? false;
+  if (!dirty || !flags.confirm) {
+    next();
+    return;
+  }
+  setEditorStatus("世界书里有未保存的改动。");
+  showEditorChoice({
+    message: "世界书里有未保存的改动",
+    confirmLabel: "保存后离开",
+    onConfirm: () => {
+      void saveLoreEditorEntry()
+        .then(next)
+        .catch((error) => setEditorStatus("保存失败：" + String(error), true));
+    },
+    altLabel: "放弃改动",
+    onAlt: next,
+  });
+}
+
+/** Hides the manager and closes the dialog. */
+function closeEditorNow(): void {
+  hideEditorChoice();
+  teardownLoreManager();
+  const dialog = document.querySelector<HTMLDialogElement>("#editor");
+  if (dialog?.open) dialog.close();
+}
+
 let deleteArmed = false;
 let deleteTimer: number | undefined;
 
@@ -1852,6 +2072,7 @@ function openEditorList(kind: EditorKind): void {
     void openPlayerEditor();
     return;
   }
+  hideEditorChoice();
   teardownLoreManager();
   editorKind = kind;
   editorId = "";
@@ -2008,6 +2229,7 @@ function openEditorForm(kind: EditorKind, id: string): void {
     openEditorList(kind);
     return;
   }
+  hideEditorChoice();
   teardownLoreManager();
   editorKind = kind;
   editorId = id;
@@ -2080,7 +2302,7 @@ function openEditorForm(kind: EditorKind, id: string): void {
         : kind === "lore"
           ? "条目在下方管理器里改；保存一次写入整本世界书，SillyTavern 字段原样保留。"
           : kind === "player"
-            ? "名字用于对话署名与提示词；身份描述写「我是谁」；行为要求写希望 AI 如何对待你。保存后立即生效。"
+            ? "名字用于对话署名与提示词；身份描述写「我是谁」；行为要求写希望 AI 如何对待你。保存后立即生效；改名会退休当前身份，好感表与关系记录清零。"
             : "记忆随当前会话保存，会参与之后每一轮的提示词拼装。";
   host.append(note);
   if (kind === "lore") mountLoreEditor(id);
@@ -2174,9 +2396,34 @@ function updateInjectPreview(): void {
   if (meta) meta.textContent = `${buildInjection(entry).length} 字`;
 }
 
+/**
+ * A renamed player card retires the old identity: the world's affection table
+ * and every relation record are cleared and the old card is kept beside it.
+ * That is a destructive step, so it asks first.
+ */
+function requestPlayerRename(entry: Entry): boolean {
+  if (entry.kind !== "player" || !flags.confirm) return false;
+  const previous = (findEntry("player", entry.id)?.title ?? "").trim();
+  const next = entry.title.trim();
+  if (previous === "" || next === "" || previous === next) return false;
+  setEditorStatus("改名会退休当前身份：世界好感表与全部关系记录清零，旧身份作为独立角色保留。");
+  showEditorChoice({
+    message:
+      "把「" + previous + "」改名为「" + next + "」会退休当前身份：世界好感表与全部关系记录清零，旧身份作为独立角色保留。",
+    confirmLabel: "确认改名并保存",
+    onConfirm: () => commitEditorEntry(entry),
+  });
+  return true;
+}
+
 async function saveEditorEntry(): Promise<void> {
   const entry = readEditorValues();
   if (!entry.id) entry.id = `${editorKind}-${Date.now().toString(36)}`;
+  if (requestPlayerRename(entry)) return;
+  await commitEditorEntry(entry);
+}
+
+async function commitEditorEntry(entry: Entry): Promise<void> {
   setEditorStatus("正在保存…");
   try {
     if (entry.kind === "lore") {
@@ -2279,6 +2526,10 @@ function refreshLibraryCounts(): void {
     const node = document.querySelector<HTMLElement>(selector);
     if (node) node.textContent = String(library[kind].length);
   }
+  // The player card lives in the world file and is read only when opened, so
+  // the count follows the loaded world rather than the cache.
+  const player = document.querySelector<HTMLElement>("#player-count");
+  if (player) player.textContent = String(library.player.length || (activeWorldId ? 1 : 0));
 }
 
 /* -------------------------------------------------------------------------
@@ -2290,13 +2541,23 @@ function closeSettings(): void {
   if (dialog.open) dialog.close();
 }
 
+/** Set once the disk config has seeded the flags for this page lifetime. */
+let configLoaded = false;
+
 /** Called by the page boot and by the rail button. */
 export async function openSettings(pane?: Pane): Promise<void> {
   const dialog = $<HTMLDialogElement>("#settings");
-  try {
-    config = await Settings.load();
-  } catch {
-    // Keep the last known values when Go cannot answer yet.
+  // Flags are authoritative at runtime; the disk config seeds them exactly once
+  // so a pending debounced save cannot be overwritten by the previous file.
+  if (!configLoaded) {
+    try {
+      config = await Settings.load();
+      configLoaded = true;
+      adoptConfig(config);
+      applyFlags();
+    } catch {
+      // Keep the last known values; a later open retries the disk read.
+    }
   }
 
   wire = config.kind === "anthropic" ? "anthropic" : "openai";
@@ -2319,9 +2580,6 @@ export async function openSettings(pane?: Pane): Promise<void> {
   $("#model-list").replaceChildren();
   $("#model-status").textContent = "";
 
-  adoptConfig(config);
-  applyFlags();
-
   const choice = currentChoice();
   renderThemeCards(choice);
   syncSwitches();
@@ -2331,6 +2589,18 @@ export async function openSettings(pane?: Pane): Promise<void> {
   showPane(fallback);
 
   if (!dialog.open) dialog.showModal();
+}
+
+/** Each sheet takes its accessible name from the heading it already shows. */
+function labelDialogs(): void {
+  const labels: [string, string][] = [
+    ["#settings", "pane-title"],
+    ["#editor", "editor-title"],
+    ["#worlds", "worlds-title"],
+  ];
+  for (const [dialog, heading] of labels) {
+    document.querySelector<HTMLDialogElement>(dialog)?.setAttribute("aria-labelledby", heading);
+  }
 }
 
 function bindSettings(): void {
@@ -2428,16 +2698,21 @@ function bindSettings(): void {
 function bindEditor(): void {
   const dialog = $<HTMLDialogElement>("#editor");
 
-  $("#editor-close").addEventListener("click", () => dialog.close());
+  $("#editor-close").addEventListener("click", () => guardUnsaved(closeEditorNow));
   $("#editor-back").addEventListener("click", () => {
     const single = editorKind === "world" || editorKind === "player";
-    if (editorMode === "form" && !single) openEditorList(editorKind);
-    else dialog.close();
+    if (editorMode === "form" && !single) guardUnsaved(() => openEditorList(editorKind));
+    else guardUnsaved(closeEditorNow);
   });
   $("#editor-save").addEventListener("click", () => void saveEditorEntry());
   $("#editor-delete").addEventListener("click", () => requestDelete());
   dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) dialog.close();
+    if (event.target === dialog) guardUnsaved(closeEditorNow);
+  });
+  // Escape must not drop the world book edits either.
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    guardUnsaved(closeEditorNow);
   });
 
   $("#open-world").addEventListener("click", () => openEditor("world"));
@@ -2539,6 +2814,8 @@ function renderWorldList(): void {
   const list = document.getElementById("world-list");
   if (!list) return;
   list.replaceChildren(...library.world.map(worldItem));
+  const title = document.getElementById("worlds-title");
+  if (title) title.textContent = library.world.length ? `世界 · ${library.world.length} 个` : "世界";
 }
 
 function openWorlds(): void {
@@ -2591,6 +2868,13 @@ function bindWorlds(): void {
    Rail: clock, scenes, world, exit
    ------------------------------------------------------------------------- */
 
+/** Drawer breakpoint; below it the rail covers the stage instead of sitting beside it. */
+const RAIL_DRAWER_QUERY = "(max-width: 720px)";
+
+function railIsDrawer(): boolean {
+  return window.matchMedia(RAIL_DRAWER_QUERY).matches;
+}
+
 function setRail(open: boolean): void {
   const app = document.getElementById("app");
   if (app) app.dataset.rail = open ? "open" : "closed";
@@ -2599,6 +2883,9 @@ function setRail(open: boolean): void {
     toggle.setAttribute("aria-expanded", String(open));
     toggle.setAttribute("aria-label", open ? "收起侧栏" : "展开侧栏");
   }
+  // A drawer over the stage must not leave a focusable page behind the scrim.
+  const stage = document.querySelector<HTMLElement>(".stage");
+  if (stage) stage.toggleAttribute("inert", railIsDrawer() && open);
 }
 
 function requestQuit(): void {
@@ -2634,6 +2921,8 @@ function bindRail(): void {
   // Closing the window or quitting from the system menu skips performQuit.
   window.addEventListener("beforeunload", () => {
     if (configTimer !== undefined) void saveConfig("manual");
+    // The runtime owns the session and world flush; tell it the page is going.
+    announce<{ at: number }>("applecos:prepare-quit", { at: Date.now() });
   });
 
   $("#new-session").addEventListener("click", createSession);
@@ -2664,20 +2953,36 @@ function bindRail(): void {
 
   const clockButton = $("#world-clock");
   const clockPanel = $("#clock-panel");
+  const setClockPanelOpen = (open: boolean, returnFocus = false): void => {
+    clockButton.setAttribute("aria-expanded", String(open));
+    clockPanel.hidden = !open;
+    if (!open && returnFocus) clockButton.focus();
+  };
   clockButton.addEventListener("click", () => {
     const open = clockButton.getAttribute("aria-expanded") === "true";
-    clockButton.setAttribute("aria-expanded", String(!open));
-    clockPanel.hidden = open;
+    setClockPanelOpen(!open);
   });
 
   for (const button of $$<HTMLButtonElement>("#clock-panel button")) {
     button.addEventListener("click", () => {
       const minutes = Number.parseInt(button.dataset.advance ?? "0", 10);
       shiftClock(Number.isFinite(minutes) ? minutes : 0, button.dataset.phase);
-      clockPanel.hidden = true;
-      clockButton.setAttribute("aria-expanded", "false");
+      setClockPanelOpen(false, true);
     });
   }
+
+  // Escape and a click outside fold the panel away, like the usage panel.
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || clockPanel.hidden) return;
+    event.preventDefault();
+    setClockPanelOpen(false, true);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (clockPanel.hidden) return;
+    const target = event.target as Node | null;
+    if (clockPanel.contains(target) || clockButton.contains(target)) return;
+    setClockPanelOpen(false);
+  });
 
   $("#quit-app").addEventListener("click", requestQuit);
   $("#quit-confirm").addEventListener("click", (event) => {
@@ -2698,6 +3003,12 @@ function bindRail(): void {
   });
 
   document.getElementById("rail-scrim")?.addEventListener("click", () => setRail(false));
+
+  // Crossing the breakpoint re-evaluates what the open drawer covers.
+  const drawer = window.matchMedia(RAIL_DRAWER_QUERY);
+  const resync = (): void =>
+    setRail(document.getElementById("app")?.dataset.rail !== "closed");
+  if (typeof drawer.addEventListener === "function") drawer.addEventListener("change", resync);
 
   statsToggle()?.addEventListener("click", () => toggleSessionStats());
   document.addEventListener("keydown", (event) => {
@@ -2774,6 +3085,8 @@ function bindShortcuts(): void {
 function bootLocalUi(): void {
   loadLocalState();
   railTab = readRailTab();
+  // The drawer covers the stage on a narrow window, so it starts folded away.
+  if (railIsDrawer()) setRail(false);
   applyFlags();
   syncSwitches();
   renderWorldPanel();
@@ -2784,9 +3097,12 @@ function bootLocalUi(): void {
 
   void Settings.load()
     .then((loaded) => {
-      adoptConfig(loaded);
-      applyFlags();
-      syncSwitches();
+      if (!configLoaded) {
+        configLoaded = true;
+        adoptConfig(loaded);
+        applyFlags();
+        syncSwitches();
+      }
       // An older build persisted "system" for palettes it did not know. Keep
       // the mirror's choice in that case so the selection survives a restart.
       const restored = loaded.theme || "system";
@@ -2802,6 +3118,7 @@ export function initSettings(): void {
   bound = true;
 
   bootLocalUi();
+  labelDialogs();
   bindSettings();
   bindSwitches();
   bindEditor();

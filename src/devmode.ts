@@ -89,6 +89,8 @@ export class DevMode {
   private source?: DevEntrySource;
   private trace = false;
   private busy: Promise<boolean> | null = null;
+  /** Reason of a close requested while a switch was in flight. */
+  private pendingLeave: string | null = null;
 
   constructor(options: DevModeOptions) {
     this.bridge = options.bridge;
@@ -145,21 +147,36 @@ export class DevMode {
       return Promise.resolve(false);
     }
     if (this.busy) return this.busy;
-    this.busy = this.runEnter(source).finally(() => {
-      this.busy = null;
-    });
+    this.busy = this.runEnter(source)
+      .then(async (opened) => {
+        // A close requested during the overture still has to happen: the setting
+        // and the mounted toolset must never disagree.
+        const queued = this.pendingLeave;
+        this.pendingLeave = null;
+        if (opened && queued !== null) {
+          await this.runLeave(queued);
+          return false;
+        }
+        return opened;
+      })
+      .finally(() => {
+        this.busy = null;
+      });
     return this.busy;
   }
 
   /**
    * Closes the door. Resolves true when the base tool set is back.
    *
-   * A switch already in flight refuses a second one: the caller waits for the
-   * next event instead of racing the bridge.
+   * A switch already in flight queues the close instead of dropping it, so a
+   * switch flipped during the overture still ends with the door shut.
    */
   leave(reason?: string): Promise<boolean> {
-    if (this.currentPhase === "idle") return Promise.resolve(false);
-    if (this.busy) return Promise.resolve(false);
+    if (this.currentPhase === "idle" && this.busy === null) return Promise.resolve(false);
+    if (this.busy) {
+      this.pendingLeave = reason ?? "";
+      return this.busy.then(() => this.currentPhase === "idle");
+    }
     this.busy = this.runLeave(reason).finally(() => {
       this.busy = null;
     });
@@ -180,6 +197,7 @@ export class DevMode {
    * startup, after the agent exists.
    */
   restore(state: DevModeState): void {
+    this.pendingLeave = null;
     if (!state.on) {
       this.currentPhase = "idle";
       this.since = undefined;

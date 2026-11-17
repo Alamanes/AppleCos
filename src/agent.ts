@@ -50,6 +50,8 @@ export interface AgentInput {
   systemPrompt?: string;
   transformContext?: AgentOptions["transformContext"];
   beforeToolCall?: AgentOptions["beforeToolCall"];
+  /** Runs after each tool call; can end the turn with terminate. */
+  afterToolCall?: AgentOptions["afterToolCall"];
   /** Reply cap; derived from the model's context window when omitted. */
   maxTokens?: number;
 }
@@ -97,14 +99,33 @@ export function normalize(config: {
   model: string;
   apiKey?: string;
 }): Endpoint {
+  const declared: Wire | null =
+    config.kind === "anthropic" ? "anthropic" : config.kind === "openai" ? "openai" : null;
   const route = detectRoute(config.baseUrl);
-  const kind: Wire = route ? route.kind : config.kind === "anthropic" ? "anthropic" : "openai";
   const typed = config.baseUrl.trim().replace(/\/+$/, "");
+  // A configured wire wins over the suffix guess, so a gateway whose calls live
+  // under /messages is not silently treated as Anthropic. The guess is only a
+  // fallback for callers that carry no explicit protocol.
+  const kind: Wire = declared ?? route?.kind ?? "openai";
+  const matched = route !== null && route.kind === kind;
+  if (route && !matched) {
+    console.warn(
+      "[agent] 地址看起来像 " + route.kind + " 端点，但协议设为 " + kind + "；按设置里的协议发送。",
+    );
+  }
+  const shape: Shape =
+    kind === "anthropic"
+      ? "chat"
+      : matched && route
+        ? route.shape
+        : config.shape === "responses"
+          ? "responses"
+          : "chat";
   return {
     kind,
-    shape: route ? route.shape : config.shape === "responses" ? "responses" : "chat",
+    shape,
     // An empty address falls back to the protocol's own endpoint.
-    baseUrl: route ? route.baseUrl : typed || defaultBaseUrl(kind),
+    baseUrl: matched && route ? route.baseUrl : typed || defaultBaseUrl(kind),
     model: config.model.trim(),
     apiKey: (config.apiKey ?? "").trim(),
   };
@@ -251,6 +272,7 @@ export async function createAgent(input: AgentInput): Promise<AgentHandle> {
     streamFn,
     transformContext: input.transformContext,
     beforeToolCall: input.beforeToolCall,
+    afterToolCall: input.afterToolCall,
   });
 
   return { agent, endpoint, model };

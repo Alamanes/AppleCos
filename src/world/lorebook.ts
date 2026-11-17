@@ -278,23 +278,37 @@ export function createKeyMatchCache(): KeyMatchCache {
   return { regex: new Map() };
 }
 
-function compiledKey(entry: LoreEntry, needle: string, cache?: KeyMatchCache): RegExp | null {
-  if (!cache) {
-    try {
-      return new RegExp(needle, entry.caseSensitive ? "" : "i");
-    } catch {
-      return null;
-    }
+/** Longest key pattern accepted as a regular expression. */
+const MAX_REGEX_KEY_CHARS = 200;
+/** Cap on the text one pattern may scan, bounding catastrophic backtracking. */
+const MAX_REGEX_HAYSTACK_CHARS = 20_000;
+/** Nested quantifiers such as (a+)+ turn a key into a backtracking trap. */
+const NESTED_QUANTIFIER = /\([^()]*[+*][^()]*\)\s*[+*{]/;
+
+/**
+ * Whether a key may be compiled at all. Activation runs on the UI thread every
+ * turn, so a pathological pattern is dropped instead of risking a freeze.
+ */
+function usablePattern(needle: string): boolean {
+  if (needle.length > MAX_REGEX_KEY_CHARS) return false;
+  return !NESTED_QUANTIFIER.test(needle);
+}
+
+function compileKey(entry: LoreEntry, needle: string): RegExp | null {
+  if (!usablePattern(needle)) return null;
+  try {
+    return new RegExp(needle, entry.caseSensitive ? "" : "i");
+  } catch {
+    return null;
   }
+}
+
+function compiledKey(entry: LoreEntry, needle: string, cache?: KeyMatchCache): RegExp | null {
+  if (!cache) return compileKey(entry, needle);
   const slot = `${entry.id}\u0000${needle}`;
   const cached = cache.regex.get(slot);
   if (cached !== undefined) return cached;
-  let compiled: RegExp | null = null;
-  try {
-    compiled = new RegExp(needle, entry.caseSensitive ? "" : "i");
-  } catch {
-    compiled = null;
-  }
+  const compiled = compileKey(entry, needle);
   cache.regex.set(slot, compiled);
   return compiled;
 }
@@ -310,7 +324,12 @@ function keyHit(
   if (needle === "") return false;
   if (entry.useRegex) {
     const regex = compiledKey(entry, needle, cache);
-    return regex !== null && regex.test(haystack);
+    if (regex === null) return false;
+    const text =
+      haystack.length > MAX_REGEX_HAYSTACK_CHARS
+        ? haystack.slice(0, MAX_REGEX_HAYSTACK_CHARS)
+        : haystack;
+    return regex.test(text);
   }
   if (entry.caseSensitive) return haystack.includes(needle);
   return haystack.toLowerCase().includes(needle.toLowerCase());

@@ -15,8 +15,9 @@
  * - divineTools(ctx): three tools, mounted only while developer mode is open.
  *   They are physically absent otherwise, so persuasion cannot reach them.
  *
- * Irreversible acts (erasing a fact, removing a character, rewinding turns) ask
- * ctx.consent first. Everything else runs directly and never interrupts play.
+ * Irreversible acts (erasing a fact, removing a character, rewinding turns) and
+ * the permanent overwrite of authored text (character fields, lore entry bodies)
+ * ask ctx.consent first. Everything else runs directly and never interrupts play.
  */
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -146,7 +147,9 @@ export interface ToolEventLog {
     | "oracle.flag"
     | "lore.write"
     | "card.create"
-    | "card.revise";
+    | "card.revise"
+    // Host-side failure, logged so a broken prompt assembly stays visible.
+    | "prompt.error";
   tool: string;
   payload: Record<string, unknown>;
 }
@@ -197,6 +200,8 @@ const MAX_MEMORY_TEXT = 400;
 const MAX_BEAT_TEXT = 200;
 const MAX_NOTE_TEXT = 400;
 const MAX_TAGS = 8;
+/** Facts one session keeps; past this the least valuable one is dropped. */
+const MAX_MEMORY_FACTS = 240;
 
 export function formatClock(minute: number): string {
   const total = Math.max(0, Math.trunc(minute));
@@ -211,6 +216,12 @@ export function formatClock(minute: number): string {
 function clip(content: string, max: number): string {
   const trimmed = content.trim();
   return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
+}
+
+/** One flattened line, short enough to read inside a confirmation card. */
+function excerpt(value: string, max: number): string {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max) + "…" : flat;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -235,9 +246,12 @@ function text(content: string): { type: "text"; text: string } {
   return { type: "text", text: content };
 }
 
-function result(content: string, details: unknown): AgentToolResult {
+function result(content: string, details: unknown, terminate = false): AgentToolResult {
   // Every payload here is plain JSON; the cast keeps unknown call sites simple.
-  return { content: [text(content)], details: details as never };
+  const payload: AgentToolResult = { content: [text(content)], details: details as never };
+  // Hint the loop to stop after this batch, used when the turn made itself moot.
+  if (terminate) payload.terminate = true;
+  return payload;
 }
 
 function failure(content: string, details: unknown = {}): AgentToolResult {
@@ -278,6 +292,11 @@ function ensureOverlay(session: SessionState, cardId: string, now: number): Char
   };
   session.overlays[cardId] = overlay;
   return overlay;
+}
+
+/** Detached copy, kept so a failed write can put the overlay back. */
+function cloneOverlay(overlay: CharacterOverlay): CharacterOverlay {
+  return { ...overlay, tags: overlay.tags.slice(), notes: overlay.notes.slice() };
 }
 
 function describeImportance(importance: number): string {
@@ -474,6 +493,49 @@ interface RememberArgs {
   kind?: string;
 }
 
+/** Punctuation-free text, so two wordings of the same fact fold together. */
+function foldFactText(value: string): string {
+  return value
+    .replace(/[\s，。、；：！？“”‘’（）()《》「」【】…,.;:!?"'~`\-]/g, "")
+    .toLowerCase();
+}
+
+/** Existing fact that already says the same thing, if any. */
+function findRepeatedFact(facts: readonly MemoryFact[], fact: MemoryFact): MemoryFact | undefined {
+  const needle = foldFactText(fact.text);
+  if (needle === "") return undefined;
+  return facts.find((entry) => {
+    if (entry.tier !== fact.tier || entry.owner !== fact.owner) return false;
+    const hay = foldFactText(entry.text);
+    if (hay === needle) return true;
+    const [shorter, longer] = hay.length <= needle.length ? [hay, needle] : [needle, hay];
+    // A short fragment is too ambiguous to count as a restatement.
+    return shorter.length >= 16 && longer.includes(shorter);
+  });
+}
+
+/** The fact to give up when memory is full: least important, softened first, then oldest. */
+function leastValuableFact(facts: readonly MemoryFact[]): MemoryFact | undefined {
+  let target: MemoryFact | undefined;
+  for (const fact of facts) {
+    if (!target) {
+      target = fact;
+      continue;
+    }
+    if (fact.importance !== target.importance) {
+      if (fact.importance < target.importance) target = fact;
+      continue;
+    }
+    const softened = (fact.softenedAt !== null ? 0 : 1) - (target.softenedAt !== null ? 0 : 1);
+    if (softened < 0) {
+      target = fact;
+      continue;
+    }
+    if (softened === 0 && fact.updatedAt < target.updatedAt) target = fact;
+  }
+  return target;
+}
+
 function rememberTool(ctx: ToolContext): AgentTool<any> {
   return {
     name: "remember",
@@ -517,15 +579,55 @@ function rememberTool(ctx: ToolContext): AgentTool<any> {
         softenedImportance: null,
         softReason: "",
       };
-      ctx.session.memory.facts.push(fact);
+      // The same fact told again updates its entry instead of piling up a duplicate.
+      const repeated = findRepeatedFact(ctx.session.memory.facts, fact);
+      if (repeated) {
+        repeated.text = fact.text;
+        repeated.keywords = [...new Set([...repeated.keywords, ...fact.keywords])].slice(0, MAX_TAGS);
+        repeated.importance = Math.max(repeated.importance, fact.importance);
+        repeated.kind = fact.kind;
+        repeated.updatedAt = now;
+        repeated.lastUsedTurn = ctx.session.meta.turn;
+        repeated.softenedAt = null;
+        repeated.softenedImportance = null;
+        repeated.softReason = "";
+        ctx.log({
+          at: now,
+          kind: "memory.add",
+          tool: "remember",
+          payload: { id: repeated.id, tier: repeated.tier, owner: repeated.owner, text: repeated.text, importance: repeated.importance, updated: true },
+        });
+        const repeatedOwner = repeated.owner ? "（" + cardName(world, repeated.owner) + "）" : "";
+        return result("已更新记下过的" + repeatedOwner + "：" + repeated.text, {
+          id: repeated.id,
+          tier: repeated.tier,
+          owner: repeated.owner,
+          updated: true,
+        });
+      }
+
+      // Memory is bounded so a long session keeps loading: the weakest fact goes.
+      const facts = ctx.session.memory.facts;
+      const evicted = facts.length >= MAX_MEMORY_FACTS ? leastValuableFact(facts) : undefined;
+      if (evicted) facts.splice(facts.indexOf(evicted), 1);
+      facts.push(fact);
       ctx.log({
         at: now,
         kind: "memory.add",
         tool: "remember",
-        payload: { id: fact.id, tier: fact.tier, owner: fact.owner, text: fact.text, importance: fact.importance },
+        payload: {
+          id: fact.id,
+          tier: fact.tier,
+          owner: fact.owner,
+          text: fact.text,
+          importance: fact.importance,
+          evicted: evicted?.id ?? "",
+        },
       });
       const ownerLabel = fact.owner ? "（" + cardName(world, fact.owner) + "）" : "";
-      return result("已记下" + ownerLabel + "：" + fact.text, { id: fact.id, tier: fact.tier, owner: fact.owner });
+      const parts = ["已记下" + ownerLabel + "：" + fact.text];
+      if (evicted) parts.push("记忆已满 " + MAX_MEMORY_FACTS + " 条，挤掉了较旧的一条（" + excerpt(evicted.text, 24) + "）");
+      return result(parts.join("。"), { id: fact.id, tier: fact.tier, owner: fact.owner, evicted: evicted?.id ?? "" });
     },
   };
 }
@@ -657,10 +759,21 @@ function updateCharacterTool(ctx: ToolContext): AgentTool<any> {
       const overlay = ensureOverlay(session, cardId, now);
       overlay.updatedAt = now;
       if (args.affinityDelta !== undefined) {
-        overlay.affinity = clampInt(overlay.affinity + args.affinityDelta, -100, 100);
-        // Mirror the scene value into the world's long-term table and persist it.
-        world.relations = { ...normalizeRelations(world.relations), [cardId]: overlay.affinity };
-        await ctx.library.saveWorld();
+        const previous = overlay.affinity;
+        const next = clampInt(previous + args.affinityDelta, -100, 100);
+        if (next !== previous) {
+          // Mirror the scene value into the world's long-term table and persist it.
+          const relations = world.relations;
+          overlay.affinity = next;
+          world.relations = { ...normalizeRelations(relations), [cardId]: next };
+          const warning = await commitAuthoring(ctx);
+          if (warning) {
+            // Both copies go back, so memory and the file still agree.
+            overlay.affinity = previous;
+            world.relations = relations;
+            return failure("好感没有改成功。" + warning, { cardId, reason: "world-save" });
+          }
+        }
       }
       if (args.relationship !== undefined) overlay.relationship = clip(args.relationship, MAX_NOTE_TEXT);
       if (args.mood !== undefined) {
@@ -1080,6 +1193,20 @@ async function commitAuthoring(ctx: ToolContext): Promise<string> {
   return "";
 }
 
+/**
+ * Asks the player before authored text is replaced for good.
+ *
+ * The written copy is the only copy: the world book and the card files keep no
+ * earlier revision, so a whole-body rewrite is as irreversible as a deletion.
+ */
+function askOverwrite(
+  ctx: ToolContext,
+  input: { tool: string; label: string; summary: string; details: string },
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  return ctx.consent.request({ ...input, irreversible: true }, { signal });
+}
+
 function loreScopeLabel(entry: LoreEntry): string {
   if (entry.constant) return "始终注入";
   if (entry.keys.length === 0) return "没有触发词，只有被其他条目或发言提及时才出现";
@@ -1137,7 +1264,7 @@ function writeLoreTool(ctx: ToolContext): AgentTool<any> {
       "把地点、组织、规则、传说写进当前世界的世界书：剧情里新出现的东西用 add 登记，已有条目与剧情对不上时用 update 改写，过时的条目用 remove 停用。写的是世界共用的设定，不是这一场的临时印象。",
     parameters: writeLoreParams,
     executionMode: "sequential",
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const args = rawParams as WriteLoreArgs;
       if (!spendAuthoring(ctx)) return failure(AUTHORING_LIMIT_MESSAGE, { reason: "authoring-limit" });
       const now = ctx.now();
@@ -1263,6 +1390,30 @@ function writeLoreTool(ctx: ToolContext): AgentTool<any> {
           worldId,
           id: entry.id,
         });
+      }
+      // Replacing the body throws the authored text away for good: ask first.
+      if (content !== undefined && content !== "" && content !== target.content) {
+        const allowed = await askOverwrite(
+          ctx,
+          {
+            tool: "write_lore",
+            label: "重写世界书",
+            summary: "改写《" + doc.name + "》条目「" + (target.title || target.id) + "」的整段正文。",
+            details:
+              "旧正文（" + target.content.length + " 字）：" + excerpt(target.content, 160) +
+              "\n新正文（" + content.length + " 字）：" + excerpt(content, 160) +
+              "\n旧正文会被永久覆盖，世界书文件里不会留副本。",
+          },
+          signal,
+        );
+        if (!allowed) {
+          return failure("玩家没有同意这次改写，世界书保持原样；不要自己重试，等他主动要求再改。", {
+            op: "update",
+            worldId,
+            id: target.id,
+            cancelled: true,
+          });
+        }
       }
       if (!target.enabled) {
         entry.enabled = true;
@@ -1405,7 +1556,7 @@ function reviseCharacterTool(ctx: ToolContext): AgentTool<any> {
       "角色经历重大变化时改写他的档案：身份、立场、外貌、说话方式。只改传进来的字段，其余字段与扩展保持原样。改动应当是剧情已经发生的结果。",
     parameters: reviseCharacterParams,
     executionMode: "sequential",
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const args = rawParams as ReviseCharacterArgs;
       if (!spendAuthoring(ctx)) return failure(AUTHORING_LIMIT_MESSAGE, { reason: "authoring-limit" });
       const now = ctx.now();
@@ -1453,6 +1604,40 @@ function reviseCharacterTool(ctx: ToolContext): AgentTool<any> {
           reason: "empty-patch",
           cardId,
         });
+      }
+
+      // The card file keeps no earlier revision, so a whole-field rewrite asks first.
+      const replacedLabels: string[] = [];
+      const replacedLines: string[] = [];
+      const fieldPairs: Array<[string, string, string | undefined]> = [
+        ["身份经历", current.description, patch.description],
+        ["性格", current.personality, patch.personality],
+        ["处境", current.scenario, patch.scenario],
+        ["说话方式", current.exampleDialogue, patch.speakingStyle],
+      ];
+      for (const [label, before, after] of fieldPairs) {
+        if (after === undefined || after === before) continue;
+        replacedLabels.push(label);
+        replacedLines.push(label + "：旧「" + excerpt(before, 120) + "」 → 新「" + excerpt(after, 120) + "」");
+      }
+      if (replacedLines.length > 0) {
+        const allowed = await askOverwrite(
+          ctx,
+          {
+            tool: "revise_character",
+            label: "改写角色卡",
+            summary: "改写「" + current.name + "」的角色卡：" + replacedLabels.join("、") + "。",
+            details: replacedLines.join("\n") + "\n旧文本会被永久覆盖，角色卡文件里不会留副本。",
+          },
+          signal,
+        );
+        if (!allowed) {
+          return failure("玩家没有同意这次改写，角色卡保持原样；不要自己重试，等他主动要求再改。", {
+            cardId,
+            name: current.name,
+            cancelled: true,
+          });
+        }
       }
 
       let next: CharacterCard;
@@ -1634,11 +1819,11 @@ function locateFacts(session: SessionState, id: string | undefined, query: strin
   return session.memory.facts.filter((fact) => factHaystack(fact, world).includes(needle));
 }
 
-function locateLore(world: World, id: string | undefined, query: string | undefined): LoreEntry[] {
-  if (id) return world.lorebook.entries.filter((entry) => entry.id === id);
+function locateLore(entries: readonly LoreEntry[], id: string | undefined, query: string | undefined): LoreEntry[] {
+  if (id) return entries.filter((entry) => entry.id === id);
   const needle = (query ?? "").trim().toLowerCase();
   if (!needle) return [];
-  return world.lorebook.entries.filter((entry) =>
+  return entries.filter((entry) =>
     [entry.content, entry.title, entry.keys.join(" ")].join(" ").toLowerCase().includes(needle),
   );
 }
@@ -1751,15 +1936,33 @@ function rewriteWorldTool(ctx: ToolContext): AgentTool<any> {
       }
 
       if (args.target === "lore") {
-        const hits = locateLore(world, args.id, args.query);
+        // Writes go through the book file, the same channel write_lore uses,
+        // so the world mirror and the stored book never diverge.
+        let loaded: { id: string; doc: LoreDocument };
+        try {
+          loaded = await ctx.library.loadBook();
+        } catch (error) {
+          return failure("读取世界书失败：" + errorText(error), { target: "lore" });
+        }
+        const doc = loaded.doc;
+        const hits = locateLore(doc.entries, args.id, args.query);
         if (hits.length === 0) {
           const content = clip(patch.text ?? "", MAX_MEMORY_TEXT);
           if (!content) return failure("新建世界书条目需要写 text。", { target: "lore" });
           const entry = defaultLoreEntry(args.id ? clip(args.id, 80) : createId("lore"), content, (patch.keys ?? []).map((key) => clip(key, 30)));
           entry.constant = patch.pinned === true;
-          world.lorebook.entries.push(entry);
-          ctx.log({ at: now, kind: "world.rewrite", tool: "rewrite_world", payload: { target: "lore", id: entry.id, created: true, reason } });
-          return result("已写入世界书（" + entry.id + "）。", { target: "lore", id: entry.id, created: true });
+          doc.entries.push(entry);
+          let saved: { id: string; doc: LoreDocument };
+          try {
+            saved = await ctx.library.saveBook(doc);
+          } catch (error) {
+            return failure("写入世界书失败：" + errorText(error), { target: "lore" });
+          }
+          const created = saved.doc.entries.filter((item) => item.content === entry.content && item.title === entry.title).pop() ?? entry;
+          ctx.log({ at: now, kind: "world.rewrite", tool: "rewrite_world", payload: { target: "lore", id: created.id, created: true, reason } });
+          const warning = await commitAuthoring(ctx);
+          if (warning) return failure("世界书已写入，" + warning, { target: "lore", id: created.id, reason: "world-save" });
+          return result("已写入世界书（" + created.id + "）。", { target: "lore", id: created.id, created: true });
         }
         if (hits.length > 1) {
           return failure("命中多条世界书，请用 id 指定：" + hits.slice(0, 6).map((entry) => entry.id).join("、"), {
@@ -1780,18 +1983,57 @@ function rewriteWorldTool(ctx: ToolContext): AgentTool<any> {
             { signal },
           );
           if (!allowed) return failure("神力被收回，这条世界书还在。", { target: "lore", cancelled: true });
-          world.lorebook.entries = world.lorebook.entries.filter((item) => item.id !== entry.id);
+          doc.entries = doc.entries.filter((item) => item.id !== entry.id);
+          try {
+            await ctx.library.saveBook(doc);
+          } catch (error) {
+            return failure("抹掉世界书失败：" + errorText(error), { target: "lore", id: entry.id });
+          }
           ctx.log({ at: now, kind: "world.rewrite", tool: "rewrite_world", payload: { target: "lore", id: entry.id, deleted: true, reason } });
+          const warning = await commitAuthoring(ctx);
+          if (warning) return failure("世界书已删除，" + warning, { target: "lore", id: entry.id, reason: "world-save" });
           return result("已抹掉世界书（" + entry.id + "）。", { target: "lore", id: entry.id, deleted: true });
         }
+        const next: LoreEntry = { ...entry, keys: entry.keys.slice(), secondaryKeys: entry.secondaryKeys.slice() };
         if (patch.text !== undefined) {
-          entry.content = clip(patch.text, MAX_MEMORY_TEXT);
-          entry.title = clip(entry.content, 40);
+          const content = clip(patch.text, MAX_MEMORY_TEXT);
+          // The stored body is the only copy, so replacing it asks first.
+          if (content !== "" && content !== entry.content) {
+            const allowed = await askOverwrite(
+              ctx,
+              {
+                tool: "rewrite_world",
+                label: "重写世界书",
+                summary: "以神力改写世界书条目「" + entry.title + "」的整段正文。",
+                details:
+                  "旧正文（" + entry.content.length + " 字）：" + excerpt(entry.content, 160) +
+                  "\n新正文（" + content.length + " 字）：" + excerpt(content, 160) +
+                  "\n理由：" + reason,
+              },
+              signal,
+            );
+            if (!allowed) return failure("神力被收回，这条世界书还在。", { target: "lore", cancelled: true });
+            next.content = content;
+            next.title = clip(content, 40);
+          }
         }
-        if (patch.keys !== undefined) entry.keys = patch.keys.map((key) => clip(key, 30)).slice(0, 12);
-        if (patch.pinned !== undefined) entry.constant = patch.pinned;
-        ctx.log({ at: now, kind: "world.rewrite", tool: "rewrite_world", payload: { target: "lore", id: entry.id, content: entry.content, reason } });
-        return result("已改写世界书（" + entry.id + "）。", { target: "lore", id: entry.id, content: entry.content });
+        if (patch.keys !== undefined) next.keys = patch.keys.map((key) => clip(key, 30)).slice(0, 12);
+        if (patch.pinned !== undefined) next.constant = patch.pinned;
+        doc.entries = doc.entries.map((item) => (item.id === entry.id ? next : item));
+        let saved: { id: string; doc: LoreDocument };
+        try {
+          saved = await ctx.library.saveBook(doc);
+        } catch (error) {
+          return failure("写入世界书失败：" + errorText(error), { target: "lore", id: entry.id });
+        }
+        const stored =
+          saved.doc.entries.find((item) => item.id === entry.id) ??
+          saved.doc.entries.filter((item) => item.content === next.content).pop() ??
+          next;
+        ctx.log({ at: now, kind: "world.rewrite", tool: "rewrite_world", payload: { target: "lore", id: stored.id, content: stored.content, reason } });
+        const warning = await commitAuthoring(ctx);
+        if (warning) return failure("世界书已改写，" + warning, { target: "lore", id: stored.id, reason: "world-save" });
+        return result("已改写世界书（" + stored.id + "）。", { target: "lore", id: stored.id, content: stored.content });
       }
 
       if (args.target === "character") {
@@ -1811,16 +2053,40 @@ function rewriteWorldTool(ctx: ToolContext): AgentTool<any> {
             { signal },
           );
           if (!allowed) return failure("神力被收回，角色还在。", { target: "character", cancelled: true });
+          const removedRelation = world.relations ? world.relations[cardId] : undefined;
+          const removedOverlay = session.overlays[cardId];
+          const cast = session.meta.cast.slice();
+          const present = runtime.present.slice();
           delete world.cards[cardId];
           if (world.relations) delete world.relations[cardId];
           delete session.overlays[cardId];
           session.meta.cast = session.meta.cast.filter((id) => id !== cardId);
           runtime.present = runtime.present.filter((id) => id !== cardId);
+          const warning = await commitAuthoring(ctx);
+          if (warning) {
+            // The card file still exists, so the world must keep it too.
+            world.cards[cardId] = card;
+            if (world.relations && removedRelation !== undefined) world.relations[cardId] = removedRelation;
+            if (removedOverlay) session.overlays[cardId] = removedOverlay;
+            session.meta.cast = cast;
+            runtime.present = present;
+            return failure("神力没有落定，角色还在。" + warning, { target: "character", cardId, reason: "world-save" });
+          }
           ctx.log({ at: now, kind: "world.rewrite", tool: "rewrite_world", payload: { target: "character", cardId, deleted: true, reason } });
           return result("已抹掉角色 " + card.name + "。", { target: "character", cardId, deleted: true });
         }
         if (!cardId) return failure("找不到这个角色：" + spoken, { target: "character" });
         if (patch.revive === true) {
+          const before = session.overlays[cardId];
+          const previous = before ? cloneOverlay(before) : null;
+          const cast = session.meta.cast.slice();
+          const present = runtime.present.slice();
+          const restore = () => {
+            if (previous) session.overlays[cardId] = previous;
+            else delete session.overlays[cardId];
+            session.meta.cast = cast;
+            runtime.present = present;
+          };
           const alive = ensureOverlay(session, cardId, now);
           const wasDead = alive.deceased === true;
           delete alive.deceased;
@@ -1835,8 +2101,14 @@ function rewriteWorldTool(ctx: ToolContext): AgentTool<any> {
             try {
               await ctx.library.saveCard(cardId, patchCardPayload(card.raw ?? card, { tags: card.tags.filter((tag) => tag !== DECEASED_TAG) }));
             } catch (error) {
+              restore();
               return failure("清除角色卡上的已故标记失败：" + errorText(error), { target: "character", cardId });
             }
+          }
+          const warning = await commitAuthoring(ctx);
+          if (warning) {
+            restore();
+            return failure("神力没有落定，角色还留在原地。" + warning, { target: "character", cardId, reason: "world-save" });
           }
           ctx.log({
             at: now,
@@ -1852,9 +2124,19 @@ function rewriteWorldTool(ctx: ToolContext): AgentTool<any> {
         const overlay = ensureOverlay(session, cardId, now);
         overlay.updatedAt = now;
         if (patch.affinity !== undefined) {
-          overlay.affinity = clampInt(patch.affinity, -100, 100);
-          world.relations = { ...normalizeRelations(world.relations), [cardId]: overlay.affinity };
-          await ctx.library.saveWorld();
+          const previous = overlay.affinity;
+          const next = clampInt(patch.affinity, -100, 100);
+          if (next !== previous) {
+            const relations = world.relations;
+            overlay.affinity = next;
+            world.relations = { ...normalizeRelations(relations), [cardId]: next };
+            const warning = await commitAuthoring(ctx);
+            if (warning) {
+              overlay.affinity = previous;
+              world.relations = relations;
+              return failure("神力没有落定，好感没有变。" + warning, { target: "character", cardId, reason: "world-save" });
+            }
+          }
         }
         if (patch.relationship !== undefined) overlay.relationship = clip(patch.relationship, MAX_NOTE_TEXT);
         if (patch.note !== undefined) {
@@ -1954,9 +2236,12 @@ function rewindTool(ctx: ToolContext): AgentTool<any> {
         tool: "rewind",
         payload: { snapshot: snapshot.id, turns: actual, keepMemory, removedTurns: outcome.removedTurns },
       });
+      // The running turn already saw the old context, so it ends here.
       return result(
-        "时间倒流了 " + actual + " 轮" + (keepMemory ? "，记忆留着。" : "，这段时间的记忆一起消失了。"),
+        "时间倒流了 " + actual + " 轮" + (keepMemory ? "，记忆留着。" : "，这段时间的记忆一起消失了。") +
+          "本轮到此为止：这一轮的正文不要再往下写，下一轮从倒流点重新开始。",
         { snapshot: snapshot.id, turns: actual, keepMemory, removedTurns: outcome.removedTurns },
+        true,
       );
     },
   };
@@ -1986,7 +2271,7 @@ function oracleTool(ctx: ToolContext): AgentTool<any> {
       "神谕控制台：查看运行状态、改写提示词章节、设置世界标记、调整确认档位、导出世界。只在开发者模式里存在。",
     parameters: oracleParams,
     executionMode: "sequential",
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const args = rawParams as OracleArgs;
       const closed = divineGuard(ctx);
       if (closed) return failure(closed, { reason: "devmode-off" });
@@ -2030,8 +2315,24 @@ function oracleTool(ctx: ToolContext): AgentTool<any> {
         }
         const content = args.clear === true ? null : (args.value as string);
         ctx.prompt.setSection(key, content);
-        ctx.log({ at: now, kind: "oracle.section", tool: "oracle", payload: { key, cleared: content === null } });
-        return result(content === null ? "已移除提示词章节 " + key + "。" : "已写入提示词章节 " + key + "。", { key, cleared: content === null });
+        // Keep the written text in the log: a section shapes every later request.
+        ctx.log({
+          at: now,
+          kind: "oracle.section",
+          tool: "oracle",
+          payload: {
+            key,
+            cleared: content === null,
+            chars: content?.length ?? 0,
+            preview: content === null ? "" : excerpt(content, 200),
+          },
+        });
+        return result(
+          content === null
+            ? "已移除提示词章节 " + key + "。"
+            : "已写入提示词章节 " + key + "（" + content.length + " 字），它会进入本会话之后每一轮的 system 提示词。",
+          { key, cleared: content === null, chars: content?.length ?? 0 },
+        );
       }
 
       if (args.op === "set_flag") {
@@ -2049,9 +2350,29 @@ function oracleTool(ctx: ToolContext): AgentTool<any> {
       }
 
       if (args.level === undefined) return failure("set_confirm 需要 level：auto、semi 或 strict。", { op: "set_confirm" });
+      const previousLevel = ctx.config.confirmLevel;
+      if (args.level === previousLevel) {
+        return result("确认档位已经是 " + previousLevel + "。", { confirmLevel: previousLevel });
+      }
+      // This is the player's safety setting, so only the player may move it.
+      const allowed = await ctx.consent.request(
+        {
+          tool: "oracle",
+          label: "调整确认档位",
+          summary: "把确认档位从 " + previousLevel + " 改为 " + args.level + "。",
+          details:
+            "确认档位决定神力工具动手前是否还要问你。调低会让不可逆操作少一道关卡；" +
+            "改高会让每一步神力都多一次确认。只有你本人能同意这次改动。",
+          irreversible: false,
+        },
+        { signal },
+      );
+      if (!allowed) {
+        return failure("玩家没有同意调整确认档位，仍是 " + previousLevel + "。", { confirmLevel: previousLevel, cancelled: true });
+      }
       ctx.config.confirmLevel = args.level;
-      ctx.log({ at: now, kind: "oracle.flag", tool: "oracle", payload: { confirmLevel: args.level } });
-      return result("确认档位已改为 " + args.level + "。", { confirmLevel: args.level });
+      ctx.log({ at: now, kind: "oracle.flag", tool: "oracle", payload: { confirmLevel: args.level, previous: previousLevel } });
+      return result("确认档位已改为 " + args.level + "（原为 " + previousLevel + "）。", { confirmLevel: args.level });
     },
   };
 }

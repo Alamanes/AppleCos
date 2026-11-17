@@ -30,8 +30,10 @@ AppleCos 是一个本地运行的 AI 角色扮演桌面应用，以世界设定�
 │   ├── cards/           独立角色卡（V3 JSON）
 │   └── lorebooks/       独立世界书（SillyTavern JSON）
 ├── sessions/<id>/
-│   ├── session.json     世界、记忆、场景、世界书状态、运行时与每轮快照
-│   └── messages.jsonl   一行一条 Pi AgentMessage，按原样追加
+│   ├── session.json     世界状态、记忆、场景、运行时、每轮快照与逐行标题（正文只在转录里）
+│   ├── messages.jsonl   一行一条 Pi AgentMessage，按原样追加
+│   └── meta.json        宿主维护的列表索引：标题、创建时间与行数
+├── inbox/、exports/     无文件弹窗时的固定导入导出目录（按需创建）
 └── Trash/               删除的世界、角色卡、世界书与会话
 ```
 

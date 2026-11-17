@@ -5,6 +5,11 @@
  * and the next request is presented only after the previous one settles. A request
  * settles exactly once, by allow, deny, timeout, cancellation, or an unbound policy.
  *
+ * Answers are bound to a request id. Only the request the UI was handed can be
+ * answered, so a stale card left on screen after a timeout cannot approve the
+ * request that replaced it. Every settlement is reported to `onSettled` so the
+ * UI can retire the card it rendered for that id, whatever the outcome was.
+ *
  * The queue holds no story state and never writes anything; callers pass a summary
  * and optional details for the UI to render.
  */
@@ -12,6 +17,7 @@
 /** What the UI is allowed to answer. */
 export type ConsentDecision = "allow" | "deny";
 
+/** Why a request stopped waiting. */
 export type ConsentOutcome = "allow" | "deny" | "timeout" | "cancelled" | "unbound";
 
 /** Behaviour when no UI has been bound yet. */
@@ -51,6 +57,9 @@ export interface ConsentInput {
  */
 export type ConsentAsk = (request: ConsentRequest) => Promise<ConsentDecision | "deferred">;
 
+/** Called once per request, with the outcome it actually ended with. */
+export type ConsentSettled = (request: ConsentRequest, outcome: ConsentOutcome) => void;
+
 export interface ConsentQueueOptions {
   /** Time a single request may stay open. Defaults to 30_000. */
   timeoutMs?: number;
@@ -65,6 +74,8 @@ interface Pending {
   settle: (outcome: ConsentOutcome) => void;
   timer: ReturnType<typeof setTimeout> | null;
   detach: (() => void) | null;
+  /** True once this request has been answered; every later answer is ignored. */
+  done: boolean;
 }
 
 /** Serial, single-shot consent queue shared by every tool that asks. */
@@ -74,7 +85,9 @@ export class ConsentQueue {
   private active: Pending | null = null;
   private policy: UnboundPolicy;
   private serial = 0;
+  private clearing = false;
   private readonly listeners = new Set<(current: ConsentRequest | null) => void>();
+  private readonly settledListeners = new Set<ConsentSettled>();
   readonly defaultTimeoutMs: number;
   private readonly clock: () => number;
 
@@ -90,12 +103,20 @@ export class ConsentQueue {
   }
 
   /**
-   * Installs the UI that answers requests. Pass null to unbind, which settles the
-   * active request as cancelled and returns the queue to the unbound policy.
+   * Installs the UI that answers requests.
+   *
+   * Passing null unbinds the queue and settles every open question as cancelled:
+   * a tool that already asked must never wait forever for a UI that left.
    */
   bind(ask: ConsentAsk | null): void {
+    if (ask === null) {
+      this.asker = null;
+      this.clear("cancelled");
+      return;
+    }
+    if (ask === this.asker) return;
     this.asker = ask;
-    if (!ask && this.active) this.settle(this.active, "cancelled");
+    this.pump();
   }
 
   setUnboundPolicy(policy: UnboundPolicy): void {
@@ -110,6 +131,17 @@ export class ConsentQueue {
   subscribe(listener: (current: ConsentRequest | null) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Called once for every request that stops waiting, with its outcome.
+   *
+   * The UI uses this to mark the card it rendered for that id as final
+   * (approved, denied, expired) and drop its buttons, including on timeout.
+   */
+  onSettled(listener: ConsentSettled): () => void {
+    this.settledListeners.add(listener);
+    return () => this.settledListeners.delete(listener);
   }
 
   /** The request the UI should show now, if any. */
@@ -150,6 +182,7 @@ export class ConsentQueue {
         settle: (outcome) => resolve(outcome === "allow"),
         timer: null,
         detach: null,
+        done: false,
       };
       this.waiting.push(pending);
       if (options.signal) {
@@ -161,7 +194,12 @@ export class ConsentQueue {
     });
   }
 
-  /** Answers the active request. Returns false when the id is not the active one. */
+  /**
+   * Answers the active request by id.
+   *
+   * Returns false when that id is not the request on screen: a click on a card
+   * that timed out or that never became active changes nothing.
+   */
   allow(id: string): boolean {
     return this.answer(id, "allow");
   }
@@ -170,11 +208,17 @@ export class ConsentQueue {
     return this.answer(id, "deny");
   }
 
-  /** Settles the active request and everything queued behind it as cancelled. */
+  /** Settles the active request and everything queued behind it. */
   clear(outcome: ConsentOutcome = "cancelled"): void {
-    for (const pending of [...this.waiting]) this.settle(pending, outcome);
-    if (this.active) this.settle(this.active, outcome);
-    this.waiting.length = 0;
+    this.clearing = true;
+    try {
+      for (const pending of [...this.waiting]) this.settle(pending, outcome);
+      this.waiting.length = 0;
+      if (this.active) this.settle(this.active, outcome);
+    } finally {
+      this.clearing = false;
+    }
+    this.emit(null);
   }
 
   /** Unbinds the UI and drops every pending question. */
@@ -182,33 +226,30 @@ export class ConsentQueue {
     this.bind(null);
     this.clear("cancelled");
     this.listeners.clear();
+    this.settledListeners.clear();
   }
 
   private answer(id: string, outcome: ConsentOutcome): boolean {
-    if (this.active?.request.id === id) {
-      this.settle(this.active, outcome);
-      return true;
-    }
-    const queued = this.waiting.find((p) => p.request.id === id);
-    if (!queued) return false;
-    const index = this.waiting.indexOf(queued);
-    if (index >= 0) this.waiting.splice(index, 1);
-    this.settle(queued, outcome);
+    const active = this.active;
+    if (!active || active.request.id !== id) return false;
+    this.settle(active, outcome);
     return true;
   }
 
   /** Presents the oldest waiting request when nothing is active. */
   private pump(): void {
-    if (this.active || !this.asker) return;
+    if (this.clearing || this.active || !this.asker) return;
     const next = this.waiting.shift();
     if (!next) {
       this.emit(null);
       return;
     }
     this.active = next;
-    this.emit(next.request);
-
+    // The timer starts before the listener runs, so a synchronous answer clears it.
     next.timer = setTimeout(() => this.settle(next, "timeout"), next.request.timeoutMs);
+    this.emit(next.request);
+    // A listener may have answered the request while it was being shown.
+    if (next.done || this.active !== next) return;
 
     const asker = this.asker;
     Promise.resolve(asker(next.request))
@@ -220,6 +261,9 @@ export class ConsentQueue {
   }
 
   private settle(pending: Pending, outcome: ConsentOutcome): void {
+    if (pending.done) return;
+    pending.done = true;
+
     if (pending.timer !== null) {
       clearTimeout(pending.timer);
       pending.timer = null;
@@ -234,12 +278,28 @@ export class ConsentQueue {
       if (index >= 0) this.waiting.splice(index, 1);
     }
 
+    this.notifySettled(pending.request, outcome);
     pending.settle(outcome);
-    this.emit(this.active?.request ?? null);
     this.pump();
   }
 
+  private notifySettled(request: ConsentRequest, outcome: ConsentOutcome): void {
+    for (const listener of this.settledListeners) {
+      try {
+        listener(request, outcome);
+      } catch {
+        // A broken listener must not leave the asking tool waiting.
+      }
+    }
+  }
+
   private emit(current: ConsentRequest | null): void {
-    for (const listener of this.listeners) listener(current);
+    for (const listener of this.listeners) {
+      try {
+        listener(current);
+      } catch {
+        // A broken listener must not break the queue.
+      }
+    }
   }
 }

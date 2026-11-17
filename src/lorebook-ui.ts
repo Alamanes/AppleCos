@@ -57,6 +57,8 @@ import {
 
 const ROW_HEIGHT = 44;
 const OVERSCAN = 8;
+/** Controls the detail form rebuilds; used to put keyboard focus back after it. */
+const DETAIL_FOCUSABLE = "input, select, textarea, button, summary";
 
 /** Wiring the editor passes in when it mounts the manager. */
 export interface LorebookManagerOptions {
@@ -65,6 +67,11 @@ export interface LorebookManagerOptions {
   onDirty: () => void;
   /** Reads the world book feature flag; previews are disabled while it is off. */
   worldbookEnabled?: () => boolean;
+  /**
+   * Reads the session the player is in, so a preview scans the transcript on
+   * screen. Returns an empty value when no conversation is open.
+   */
+  currentSession?: () => string | null | undefined;
 }
 
 export interface LorebookSaveResult {
@@ -978,85 +985,127 @@ export function mountLorebookManager(
     return node;
   }
 
-  function renderBulk(): void {
-    const count = selected.size;
-    const idle = count === 0 || doc === null;
-    const bar = make("div", "lore-bulk");
-    bar.append(make("span", "lore-bulk-count", "已选 " + String(count) + " 条"));
+  // The bar is built once and only synced afterwards, so typing in its group
+  // field and an armed delete button survive selection changes and re-renders.
+  const bulkBar = make("div", "lore-bulk");
+  const bulkCount = make("span", "lore-bulk-count", "已选 0 条");
+  const bulkEnable = bulkButton("启用", () => applyToSelected((entry) => setEnabled(entry, true)), true);
+  const bulkDisable = bulkButton("停用", () => applyToSelected((entry) => setEnabled(entry, false)), true);
+  const bulkDuplicate = bulkButton("复制", () => duplicateSelected(), true);
 
-    bar.append(
-      bulkButton("启用", () => applyToSelected((entry) => setEnabled(entry, true)), idle),
-      bulkButton("停用", () => applyToSelected((entry) => setEnabled(entry, false)), idle),
-      bulkButton("复制", () => duplicateSelected(), idle),
-    );
+  const bulkGroupInput = make("input", "field lore-group-input");
+  bulkGroupInput.placeholder = "互斥组名";
+  bulkGroupInput.autocomplete = "off";
+  bulkGroupInput.addEventListener("input", () => {
+    groupName = bulkGroupInput.value;
+  });
 
-    const groupInput = make("input", "field lore-group-input");
-    groupInput.placeholder = "互斥组名";
-    groupInput.autocomplete = "off";
-    groupInput.value = groupName;
-    groupInput.addEventListener("input", () => {
-      groupName = groupInput.value;
-    });
-    bar.append(groupInput);
-    bar.append(
-      bulkButton(
-        "设置互斥组",
-        () => {
-          const name = groupName.trim();
-          if (name === "") {
-            options.onStatus("请先填写互斥组名称");
-            return;
-          }
-          applyToSelected((entry) => assignGroup(entry, name));
-        },
-        idle,
-      ),
-      bulkButton("清除互斥组", () => applyToSelected((entry) => clearGroup(entry)), idle),
-      bulkButton("注入顺序 −10", () => applyToSelected((entry) => shiftOrder(entry, -10)), idle),
-      bulkButton("注入顺序 +10", () => applyToSelected((entry) => shiftOrder(entry, 10)), idle),
-    );
+  const bulkGroupSet = bulkButton(
+    "设置互斥组",
+    () => {
+      const name = groupName.trim();
+      if (name === "") {
+        options.onStatus("请先填写互斥组名称");
+        return;
+      }
+      applyToSelected((entry) => assignGroup(entry, name));
+    },
+    true,
+  );
+  const bulkGroupClear = bulkButton("清除互斥组", () => applyToSelected((entry) => clearGroup(entry)), true);
+  const bulkOrderBack = bulkButton("注入顺序 −10", () => applyToSelected((entry) => shiftOrder(entry, -10)), true);
+  const bulkOrderNext = bulkButton("注入顺序 +10", () => applyToSelected((entry) => shiftOrder(entry, 10)), true);
 
-    const targetSelect = make("select", "field lore-move-select");
-    const placeholder = make("option", "", "移动到目标书…");
-    placeholder.value = "";
-    targetSelect.append(placeholder);
+  const bulkMoveSelect = make("select", "field lore-move-select");
+  const bulkMovePlaceholder = make("option", "", "移动到目标书…");
+  bulkMovePlaceholder.value = "";
+  bulkMoveSelect.append(bulkMovePlaceholder);
+  bulkMoveSelect.addEventListener("change", () => {
+    moveTarget = bulkMoveSelect.value;
+    renderBulk();
+  });
+  const bulkMove = bulkButton("移动", () => moveSelected(), true);
+  const bulkExport = bulkButton("导出所选", () => exportSelected(), true);
+  const bulkDelete = bulkButton(
+    "删除所选",
+    () => {
+      if (!deleteArmed) {
+        deleteArmed = true;
+        window.clearTimeout(deleteTimer);
+        deleteTimer = window.setTimeout(() => {
+          deleteArmed = false;
+          renderBulk();
+        }, 4000);
+        options.onStatus("再点一次确认删除所选条目；删除整本世界书请用编辑器底部的删除按钮。");
+        renderBulk();
+        return;
+      }
+      deleteArmed = false;
+      window.clearTimeout(deleteTimer);
+      deleteSelected();
+    },
+    true,
+  );
+  bulkDelete.classList.add("lore-danger");
+
+  bulkBar.append(
+    bulkCount,
+    bulkEnable,
+    bulkDisable,
+    bulkDuplicate,
+    bulkGroupInput,
+    bulkGroupSet,
+    bulkGroupClear,
+    bulkOrderBack,
+    bulkOrderNext,
+    bulkMoveSelect,
+    bulkMove,
+    bulkExport,
+    bulkDelete,
+  );
+  bulkHost.append(bulkBar);
+
+  let moveChoicesKey = "";
+
+  /** Refills the move targets only when the set of target books changed. */
+  function syncMoveChoices(): void {
+    const key = bookId + "|" + choices.map((choice) => choice.id + ":" + choice.name).join(",");
+    if (key === moveChoicesKey) return;
+    moveChoicesKey = key;
+    bulkMoveSelect.replaceChildren(bulkMovePlaceholder);
     for (const choice of choices) {
       if (choice.id === bookId) continue;
       const option = make("option", "", choice.name);
       option.value = choice.id;
-      targetSelect.append(option);
+      bulkMoveSelect.append(option);
     }
-    targetSelect.value = moveTarget;
-    targetSelect.addEventListener("change", () => {
-      moveTarget = targetSelect.value;
-    });
-    bar.append(targetSelect, bulkButton("移动", () => moveSelected(), idle || moveTarget === ""));
-    bar.append(bulkButton("导出所选", () => exportSelected(), idle));
+    if (moveTarget !== "" && !choices.some((choice) => choice.id === moveTarget && choice.id !== bookId)) {
+      moveTarget = "";
+    }
+    bulkMoveSelect.value = moveTarget;
+  }
 
-    const deleteButton = bulkButton(
-      deleteArmed ? "再点一次删除" : "删除所选",
-      () => {
-        if (!deleteArmed) {
-          deleteArmed = true;
-          window.clearTimeout(deleteTimer);
-          deleteTimer = window.setTimeout(() => {
-            deleteArmed = false;
-            renderBulk();
-          }, 4000);
-          options.onStatus("再点一次确认删除所选条目；删除整本世界书请用编辑器底部的删除按钮。");
-          renderBulk();
-          return;
-        }
-        deleteArmed = false;
-        window.clearTimeout(deleteTimer);
-        deleteSelected();
-      },
-      idle,
-    );
-    deleteButton.classList.add("lore-danger");
-    bar.append(deleteButton);
-
-    bulkHost.replaceChildren(bar);
+  function renderBulk(): void {
+    const count = selected.size;
+    const idle = count === 0 || doc === null;
+    bulkCount.textContent = "已选 " + String(count) + " 条";
+    for (const node of [
+      bulkEnable,
+      bulkDisable,
+      bulkDuplicate,
+      bulkGroupSet,
+      bulkGroupClear,
+      bulkOrderBack,
+      bulkOrderNext,
+      bulkExport,
+      bulkDelete,
+    ]) {
+      node.disabled = idle;
+    }
+    syncMoveChoices();
+    bulkMove.disabled = idle || moveTarget === "";
+    bulkDelete.textContent = deleteArmed ? "再点一次删除" : "删除所选";
+    if (bulkGroupInput.value !== groupName) bulkGroupInput.value = groupName;
   }
 
   function applyToSelected(transform: (entry: LoreEntry) => LoreEntry): void {
@@ -1220,7 +1269,34 @@ export function mountLorebookManager(
     return label;
   }
 
+  /** Position of the focused control inside the detail form, or -1 outside it. */
+  function focusSlot(): number {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !detailHost.contains(active)) return -1;
+    const list = Array.from(detailHost.querySelectorAll<HTMLElement>(DETAIL_FOCUSABLE));
+    return list.indexOf(active);
+  }
+
+  /** Puts focus and the caret back after a legitimate rebuild of the form. */
+  function restoreFocus(slot: number, caret: number | null): void {
+    if (slot < 0) return;
+    const node = Array.from(detailHost.querySelectorAll<HTMLElement>(DETAIL_FOCUSABLE))[slot];
+    if (!node) return;
+    node.focus();
+    if (caret !== null && (node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) {
+      try {
+        node.setSelectionRange(caret, caret);
+      } catch {
+        // Numeric inputs refuse a caret range; focus alone is enough there.
+      }
+    }
+  }
+
   function renderDetail(): void {
+    const slot = focusSlot();
+    const active = document.activeElement;
+    const caret =
+      active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ? active.selectionStart : null;
     detailHost.replaceChildren();
     effectText = null;
     if (!doc) {
@@ -1255,7 +1331,7 @@ export function mountLorebookManager(
       checkBlock(
         "启用条目",
         current.enabled,
-        (value) => updateEntry(current.id, { enabled: value }, true),
+        (value) => updateEntry(current.id, { enabled: value }),
         HINTS.enabled,
       ),
     );
@@ -1314,7 +1390,7 @@ export function mountLorebookManager(
       checkBlock(
         "始终注入",
         current.constant,
-        (value) => updateEntry(current.id, { constant: value }, true),
+        (value) => updateEntry(current.id, { constant: value }),
         HINTS.constant,
       ),
     );
@@ -1322,7 +1398,7 @@ export function mountLorebookManager(
     const chanceRow = make("div", "lore-chance");
     chanceRow.append(
       checkInput("按概率触发", current.useProbability, (value) =>
-        updateEntry(current.id, { useProbability: value }, true),
+        updateEntry(current.id, { useProbability: value }),
       ),
       fieldBlock(
         "触发概率（%）",
@@ -1354,7 +1430,7 @@ export function mountLorebookManager(
             { value: "at_depth", label: "指定深度" },
           ],
           current.position,
-          (value) => updateEntry(current.id, { position: value as LorePosition }, true),
+          (value) => updateEntry(current.id, { position: value as LorePosition }),
         ),
         HINTS.position,
       ),
@@ -1486,15 +1562,24 @@ export function mountLorebookManager(
       );
     }
     detailHost.append(report);
+    restoreFocus(slot, caret);
+  }
+
+  /** What one preview run scanned, plus the line that says where it came from. */
+  interface PreviewInput {
+    messages: WorldMessage[];
+    turn: number;
+    source: string;
   }
 
   function formatEntryReport(
     entry: LoreEntry,
     result: ReturnType<typeof explainEntry>,
-    messageCount: number,
+    input: PreviewInput,
   ): string {
     const lines: string[] = [];
-    lines.push("试算本条 · 检索 " + String(messageCount) + " 条消息");
+    lines.push(input.source);
+    lines.push("试算本条 · 检索 " + String(input.messages.length) + " 条消息");
     if (result.activated) {
       lines.push("结果：生效（" + reasonText(result.reason ?? "keyword") + "）");
     } else {
@@ -1511,14 +1596,15 @@ export function mountLorebookManager(
   function formatBookReport(
     result: LoreActivationResult,
     entries: readonly LoreEntry[],
-    messageCount: number,
+    input: PreviewInput,
   ): string {
     const lines: string[] = [];
+    lines.push(input.source);
     lines.push(
       "试算整书 · 第 " +
         String(result.log.turn) +
         " 轮 · 检索 " +
-        String(messageCount) +
+        String(input.messages.length) +
         " 条消息 · 篇幅上限 " +
         String(result.log.budgetChars) +
         " 字（随机值固定 0.5）",
@@ -1557,12 +1643,12 @@ export function mountLorebookManager(
     return lines.join("\n");
   }
 
-  async function loadPreviewInput(): Promise<{ messages: WorldMessage[]; turn: number }> {
+  /** Reads one stored transcript; null means the read failed. */
+  async function readPreviewSession(
+    id: string,
+  ): Promise<{ messages: WorldMessage[]; turn: number; title: string } | null> {
     try {
-      const list = await Sessions.list();
-      const first = list[0];
-      if (!first) return { messages: [], turn: 1 };
-      const data = await Sessions.load(first.id);
+      const data = await Sessions.load(id);
       const raw: unknown[] = [];
       for (const line of data.messages ?? []) {
         try {
@@ -1581,10 +1667,49 @@ export function mountLorebookManager(
       } catch {
         // A pending or empty state keeps turn 1.
       }
-      return { messages: scanMessages(raw as AgentMessage[]), turn };
+      const title = data.summary?.title?.trim() || data.summary?.id || id;
+      return { messages: scanMessages(raw as AgentMessage[]), turn, title };
     } catch {
-      return { messages: [], turn: 1 };
+      return null;
     }
+  }
+
+  /**
+   * Picks the transcript behind a preview. The editor supplies the session the
+   * player is in; when it cannot, the report says so rather than passing some
+   * arbitrary recent conversation off as the current scene.
+   */
+  async function loadPreviewInput(): Promise<PreviewInput> {
+    const open = options.currentSession ? (options.currentSession() ?? "") : "";
+    if (open !== "") {
+      const current = await readPreviewSession(open);
+      if (current) {
+        return {
+          messages: current.messages,
+          turn: current.turn,
+          source: "试算场次：当前场次《" + current.title + "》",
+        };
+      }
+      return { messages: [], turn: 1, source: "试算场次：当前场次读取失败，本次按空对话试算" };
+    }
+    let newest: string | undefined;
+    try {
+      newest = (await Sessions.list())[0]?.id;
+    } catch {
+      return { messages: [], turn: 1, source: "试算场次：读取场次列表失败，本次按空对话试算" };
+    }
+    if (!newest) {
+      return { messages: [], turn: 1, source: "试算场次：当前没有场次，本次按空对话试算" };
+    }
+    const fallback = await readPreviewSession(newest);
+    if (!fallback) {
+      return { messages: [], turn: 1, source: "试算场次：读取最近一场失败，本次按空对话试算" };
+    }
+    return {
+      messages: fallback.messages,
+      turn: fallback.turn,
+      source: "试算场次：当前无场次，试算基于最近一场《" + fallback.title + "》",
+    };
   }
 
   async function runPreview(
@@ -1602,12 +1727,12 @@ export function mountLorebookManager(
     const book = loreDocumentToBook(doc, bookId);
     const input = await loadPreviewInput();
     if (mode === "entry") {
-      report.textContent = formatEntryReport(entry, explainEntry(book, entry, input.messages, input.turn), input.messages.length);
+      report.textContent = formatEntryReport(entry, explainEntry(book, entry, input.messages, input.turn), input);
     } else {
       report.textContent = formatBookReport(
         previewActivation(book, input.messages, input.turn),
         doc.entries,
-        input.messages.length,
+        input,
       );
     }
     report.hidden = false;
@@ -1623,6 +1748,13 @@ export function mountLorebookManager(
     recursiveInput.checked = doc.recursive;
   }
 
+  /**
+   * Books merged into this one by 合并导入. They are removed from the shelf only
+   * after a save wrote the merged entries, so a failed or skipped save keeps
+   * the import reachable.
+   */
+  let pendingRemoval: { id: string; name: string }[] = [];
+
   async function save(): Promise<LorebookSaveResult> {
     if (!doc) throw new Error("世界书还没有载入，先关闭再打开");
     doc.name = nameInput.value.trim() || doc.name;
@@ -1634,7 +1766,33 @@ export function mountLorebookManager(
     renderChrome();
     renderDetail();
     void refreshChoices();
+    await removeMergedSources(saved.id);
     return { id: saved.id, doc: saved.doc };
+  }
+
+  /** Deletes merged source books once their entries are written to this one. */
+  async function removeMergedSources(keepId: string): Promise<void> {
+    if (pendingRemoval.length === 0) return;
+    const queue = pendingRemoval;
+    pendingRemoval = [];
+    const failed: string[] = [];
+    let removed = 0;
+    for (const item of queue) {
+      if (item.id === keepId) continue;
+      try {
+        await deleteLibraryEntry("lore", item.id);
+        removed += 1;
+      } catch (error) {
+        pendingRemoval.push(item);
+        failed.push(item.name + "：" + String(error));
+      }
+    }
+    if (removed > 0) void refreshChoices();
+    if (failed.length > 0) {
+      options.onStatus("已保存，但源世界书未能删除（" + failed.join("；") + "），下次保存会重试", true);
+    } else if (removed > 0) {
+      options.onStatus("已保存，并删除已合并的源世界书 " + String(removed) + " 本");
+    }
   }
 
   async function exportSelected(): Promise<void> {
@@ -1701,9 +1859,11 @@ export function mountLorebookManager(
       markDirty();
       renderChrome();
       renderDetail();
-      await deleteLibraryEntry("lore", imported.id);
+      pendingRemoval.push({ id: imported.id, name: imported.name });
       void refreshChoices();
-      options.onStatus("已合并导入 " + String(result.moved.length) + " 条，保存后写入");
+      options.onStatus(
+        "已合并导入 " + String(result.moved.length) + " 条，保存后写入并删除源书《" + imported.name + "》",
+      );
       return { count: result.moved.length, name: imported.name };
     } catch (error) {
       options.onStatus("合并导入失败：" + String(error), true);

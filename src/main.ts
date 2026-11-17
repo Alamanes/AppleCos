@@ -32,11 +32,12 @@ import {
   saveWorldLoreDocument,
   seedWorldArtifacts,
 } from "./library";
-import { Sessions, Settings, Shell, type Config, type SessionSummary } from "./mygo";
+import { Sessions, Settings, Shell, events, type Config, type SessionSummary } from "./mygo";
 import {
   applyTheme,
   initSettings,
   openSettings,
+  readConfig,
   readFlags,
   refreshLibrary,
   setDevFlag,
@@ -55,6 +56,8 @@ import {
   type SessionMeta,
   type WorldState,
 } from "./settings";
+import { isMyGo } from "mygo-runtime";
+
 import { ChatView, messageText, type ToolHandle } from "./ui";
 import {
   emptyRuntime,
@@ -70,15 +73,18 @@ import {
   type ToolEventLog,
 } from "./tools";
 import { createBlockStream, parseBlocks, type Block } from "./world/blocks";
+import { mergeCardBooks } from "./world/card";
 import { defaultWorld } from "./world/defaults";
-import { createTransformContext, scanMessages } from "./world/prompt";
+import { createTransformContext, LORE_ISOLATION, scanMessages } from "./world/prompt";
 import {
   absorbLore,
   advanceTurn,
   appendMessage as appendWorldMessage,
+  applyProjections,
   createSession as buildSession,
   hydrateSession,
   pruneSnapshots,
+  readProjections,
   restoreSession,
   rewindSession,
   setScene,
@@ -97,6 +103,8 @@ import {
   normalizeRelations,
   relationOf,
   type CharacterCard,
+  type LoreActivationResult,
+  type Lorebook,
   type PlayerIdentity,
   type SessionState,
   type TurnSnapshot,
@@ -164,6 +172,24 @@ let summaries: SessionSummary[] = [];
 let running = false;
 let ready = false;
 
+/**
+ * Generation of the last session open. Every await inside openSession checks it,
+ * so a slow load cannot commit a session the player already left.
+ */
+let openingToken = 0;
+/** True while a switch owns the session; later clicks are queued, last one wins. */
+let switchingSession = false;
+type SwitchRequest = { kind: "open"; id: string } | { kind: "new" };
+let pendingSwitch: SwitchRequest | null = null;
+/** Set by a rewind so afterToolCall can end the turn on a clean transcript. */
+let rewindRequested = false;
+/** Lore activation of the request in flight; committed only once a reply lands. */
+let pendingLore: LoreActivationResult | null = null;
+/** Prompt assembly failures are reported once, not on every request. */
+let promptFailureReported = false;
+/** Card books merged into the world book, rebuilt only when the cast changes. */
+let cardBookCache: { key: string; book: Lorebook } | null = null;
+
 const consent = new ConsentQueue({ unboundPolicy: "deny", timeoutMs: 120_000 });
 const toolConfig: ToolConfig = { confirmLevel: "semi" };
 const sections = new Map<string, string>();
@@ -200,6 +226,18 @@ function firstLine(text: string): string {
     .map((row) => row.trim())
     .find((row) => row.length > 0);
   return line ? line.slice(0, 40) : "";
+}
+
+/** Strips the IPC wrapper and maps failures a player can act on. */
+function readableError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const text = raw.replace(/^CallError:\s*/i, "").trim();
+  if (/already processing/i.test(text)) return "上一轮还在收尾，请稍等一秒再发。";
+  if (/is this page running inside a mygo|runtime not found/i.test(text)) {
+    return "宿主没有响应，请从应用窗口里打开页面。";
+  }
+  if (/no api key|missing api key/i.test(text)) return "还没有填写 API 密钥。";
+  return text;
 }
 
 function clockLabel(minute: number): string {
@@ -241,6 +279,10 @@ function defaultConfig(): Config {
       worldbook: true,
       memory: true,
       tools: true,
+      toolsDice: true,
+      toolsTime: true,
+      toolsScene: true,
+      toolsLore: true,
       developerMode: false,
     },
   };
@@ -254,12 +296,35 @@ function withRuntime(state: SessionState, rt: StoryRuntime = runtime): SessionSt
   return { ...state, runtime: { ...rt } } as unknown as SessionState;
 }
 
+/**
+ * Serializes every write of the open session. A rewrite and an append both
+ * target messages.jsonl, so the order they reach disk must match the order the
+ * page produced them; state writes join the same queue for the same reason.
+ */
+let sessionIo: Promise<void> = Promise.resolve();
+
+function queueIo<T>(work: () => Promise<T>): Promise<T> {
+  const run = sessionIo.then(work, work);
+  sessionIo = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 async function saveStateNow(): Promise<void> {
-  if (!activeId || !session) return;
+  if (!activeId) return;
+  // The payload is snapshotted now; a later switch must not retarget this write.
+  const payload = { ...withRuntime(session), stats: sessionStats } as unknown as SessionState;
   try {
-    await store.saveSession({ ...withRuntime(session), stats: sessionStats } as unknown as SessionState);
+    await queueIo(() => store.saveSession(payload));
   } catch (error) {
-    view.error("保存会话失败：" + String(error));
+    const reason = readableError(error);
+    // A size limit is the one failure the player can act on: say what to do.
+    const hint = /太大|过大|too large/i.test(reason)
+      ? "（状态已超过宿主上限，请清理快照或另开新场次）"
+      : "";
+    view.error("保存会话失败：" + reason + hint);
   }
 }
 
@@ -277,7 +342,7 @@ function saveWorldNow(): Promise<void> {
       try {
         await store.saveWorld(world);
       } catch (error) {
-        view.error("保存世界失败：" + String(error));
+        view.error("保存世界失败：" + readableError(error));
       }
     })
     .catch(() => undefined);
@@ -303,6 +368,12 @@ function runtimeOf(state: unknown): StoryRuntime {
 
 function currentTranscript(): AgentMessage[] {
   return handle ? [...handle.agent.state.messages] : [...transcript];
+}
+
+/** The one place the live transcript is replaced; the view follows the agent. */
+function setTranscript(messages: AgentMessage[]): void {
+  transcript = messages;
+  if (handle) handle.agent.state.messages = transcript;
 }
 
 function promptCards(): CharacterCard[] {
@@ -423,8 +494,14 @@ function setPromptSection(name: string, text: string | null): void {
 
 function appendPromptSections(messages: AgentMessage[]): AgentMessage[] {
   if (sections.size === 0) return messages;
+  // The oracle section is the developer-mode contract. Every other section is
+  // text injected through a tool, so it is framed as reference data like lore.
   const extra = [...sections.entries()]
-    .map(([name, body]) => "## " + name + "\n" + body)
+    .map(([name, body]) =>
+      name === ORACLE_SECTION_NAME
+        ? "## " + name + "\n" + body
+        : "## " + name + "\n" + LORE_ISOLATION + "\n" + body,
+    )
     .join("\n\n");
   const first = messages[0];
   if (first && (first as unknown as { role?: string }).role === "system") {
@@ -464,6 +541,43 @@ function sanitizeTranscript(messages: readonly AgentMessage[]): AgentMessage[] {
   return kept;
 }
 
+/**
+ * Cuts the live transcript at the message that closed the snapshot's turn. Real
+ * Pi messages are kept, so tool calls and results survive a rewind; the world
+ * projection alone only carries plain text.
+ */
+function cropTranscript(messages: readonly AgentMessage[], keep: number): AgentMessage[] | null {
+  if (keep <= 0) return null;
+  let seen = 0;
+  let cut = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (!message) continue;
+    const role = (message as unknown as { role?: string }).role;
+    if (role !== "user" && role !== "assistant") continue;
+    if (messageText(message).trim() === "") continue;
+    seen += 1;
+    if (seen === keep) {
+      cut = index + 1;
+      break;
+    }
+  }
+  if (cut < 0) return null;
+  const kept = messages.slice(0, cut);
+  // A result or a call whose pair fell outside the cut is invalid upstream.
+  while (kept.length > 0 && (kept[kept.length - 1] as unknown as { role?: string })?.role === "toolResult") {
+    kept.pop();
+  }
+  const last = kept[kept.length - 1] as { role?: string; content?: unknown } | undefined;
+  if (last?.role === "assistant" && Array.isArray(last.content)) {
+    const blocks = last.content.filter((block) => (block as { type?: string }).type !== "toolCall");
+    if (blocks.length !== last.content.length) {
+      kept[kept.length - 1] = { ...last, content: blocks } as unknown as AgentMessage;
+    }
+  }
+  return kept;
+}
+
 function rewindTo(
   snapshot: TurnSnapshot,
   options: { keepMemory: boolean },
@@ -475,15 +589,14 @@ function rewindTo(
   const next = rewindSession(session, snapshot.turn);
   if (options.keepMemory) next.memory = memory;
   commitSession(next);
-  const messages = agentMessagesFrom(session.messages);
-  current.agent.state.messages = messages;
-  transcript = messages;
+  const keep = next.messages.filter((message) => !message.hidden && message.content.trim() !== "").length;
+  const messages = cropTranscript(current.agent.state.messages, keep) ?? agentMessagesFrom(next.messages);
+  setTranscript(messages);
   needsRerender = true;
+  // finishTurn rewrites the file once the turn closes, so the transcript is not
+  // rewritten twice for the same rewind.
   rewindPending = true;
-  void Sessions.replaceMessages(
-    session.meta.id,
-    messages.map((message) => JSON.stringify(message)),
-  ).catch((error) => view.error("重写对话失败：" + String(error)));
+  rewindRequested = true;
   scheduleSave();
   pushWorldState();
   return {
@@ -526,25 +639,53 @@ function ensureToolContext(): ToolContext {
    Agent assembly
    ------------------------------------------------------------------------- */
 
+/**
+ * The world book with each card's own book folded in, so a setting imported
+ * from a PNG or CHARX actually fires. Cached: rebuilding the entries every turn
+ * would allocate a new book per request.
+ */
+function lorebookWithCards(cards: readonly CharacterCard[]): Lorebook {
+  const key = [
+    world.id,
+    world.lorebook.entries.length,
+    ...cards.map((card) => card.id + ":" + (card.lorebook ? card.lorebook.entries.length : 0)),
+  ].join("|");
+  if (cardBookCache && cardBookCache.key === key) return cardBookCache.book;
+  const book = mergeCardBooks(world.lorebook, cards);
+  cardBookCache = { key, book };
+  return book;
+}
+
 function buildTransform() {
   return createTransformContext({
     snapshot: () => {
       const flags = readFlags();
-      const worldView: World = flags.worldbook
-        ? world
-        : { ...world, lorebook: { ...world.lorebook, entries: [] } };
+      const cards = promptCards();
+      const book: Lorebook = flags.worldbook
+        ? lorebookWithCards(cards)
+        : { ...world.lorebook, entries: [] };
+      const worldView: World = { ...world, lorebook: book };
       const sessionView: SessionState = flags.memory
         ? session
         : { ...session, memory: { facts: [] } };
-      return { world: worldView, cards: promptCards(), player: session.player, session: sessionView };
+      return { world: worldView, cards, player: session.player, session: sessionView };
     },
     historyBudgetChars: historyBudget(),
+    // Lore counters advance only once a reply lands, so a retried or aborted
+    // request does not burn sticky and cooldown turns.
     onLore: (result) => {
       if (!readFlags().worldbook) return;
-      commitSession(absorbLore(session, result));
-      pushWorldState();
+      pendingLore = result;
     },
     instructions: config.prompt?.trim() || undefined,
+    onError: (error) => {
+      console.error("[prompt] 装配失败", error);
+      if (promptFailureReported) return;
+      promptFailureReported = true;
+      const reason = readableError(error);
+      view.error("提示词装配失败，已退回最小规则：" + reason);
+      logToolEvent({ at: Date.now(), kind: "prompt.error", tool: "prompt", payload: { message: reason } });
+    },
     onSections: (list) => {
       const context = sectionsToStats(list);
       sessionStats = {
@@ -569,8 +710,9 @@ async function beforeToolCall(context: {
   const name = context.toolCall.name;
   const mounted = mountedToolNames();
   if (!mounted.includes(name)) {
-    // A model that mistakes a JSON field name for a tool gets told the format
-    // instead of a bare refusal, so the next attempt writes the reply properly.
+    // Upstream resolves the tool before this hook, so this branch only fires when
+    // the mounted set changed mid-loop. Answering with the reply format keeps
+    // that case from turning into a bare English error.
     return {
       block: true,
       reason:
@@ -592,20 +734,41 @@ async function beforeToolCall(context: {
   return undefined;
 }
 
+/**
+ * Ends the turn right after a rewind. The running loop still holds the context
+ * it started with, so letting it write on would narrate a timeline that no
+ * longer exists; the next turn starts from the rewritten transcript.
+ */
+async function afterToolCall(): Promise<{ terminate?: boolean } | undefined> {
+  if (!rewindRequested) return undefined;
+  rewindRequested = false;
+  return { terminate: true };
+}
+
 function bindAgent(agent: AgentHandle["agent"]): void {
   agent.subscribe(async (event) => {
     try {
       await handleAgentEvent(event);
     } catch (error) {
-      view.error("处理事件失败：" + String(error));
+      view.error("处理事件失败：" + readableError(error));
     }
   });
 }
 
-async function rebuildAgent(messages: AgentMessage[], reason: string): Promise<void> {
-  transcript = [...messages];
-  if (!config.model.trim()) {
+/**
+ * Rebuilds the kernel agent. On failure the old handle is dropped instead of
+ * kept: an agent built from a previous endpoint would keep sending the old key
+ * to the old address while the panel shows the new, empty configuration.
+ */
+async function rebuildAgent(
+  messages: AgentMessage[],
+  reason: string,
+  generation: number = openingToken,
+): Promise<void> {
+  const seed = [...messages];
+  if (!config || !config.model.trim()) {
     handle = null;
+    transcript = seed;
     return;
   }
   const contextWindow = Math.max(2048, Math.min(2_000_000, config.contextWindow || 32_000));
@@ -614,22 +777,27 @@ async function rebuildAgent(messages: AgentMessage[], reason: string): Promise<v
   try {
     const next = await createAgent({
       config,
-      messages,
+      messages: seed,
       systemPrompt: "",
       tools: mountedTools(ctx),
       transformContext: buildTransform(),
       beforeToolCall: (context) => beforeToolCall(context),
+      afterToolCall: () => afterToolCall(),
       maxTokens,
     });
+    // The player may have opened another session while the kernel was starting.
+    if (generation !== openingToken) return;
     bindAgent(next.agent);
     handle = next;
-    transcript = [...next.agent.state.messages];
+    setTranscript([...next.agent.state.messages]);
     if (runtime.devMode.on) next.agent.state.tools = mountedTools(ctx, true);
     if (reason === "session") {
       needsRerender = false;
     }
   } catch (error) {
-    view.error("模型没有连上：" + String(error));
+    handle = null;
+    transcript = seed;
+    view.error("模型没有连上：" + readableError(error) + "（发送已被阻止）");
   }
 }
 
@@ -695,17 +863,27 @@ async function handleAgentEvent(event: AgentEvent): Promise<void> {
     case "message_end": {
       const message = event.message;
       const role = (message as unknown as { role?: string }).role;
-      await persistMessage(message);
-      if (role !== "assistant") return;
+      const record = message as unknown as { stopReason?: string; errorMessage?: string };
+      const interrupted =
+        role === "assistant" && (record.stopReason === "error" || record.stopReason === "aborted");
+      if (role !== "assistant") {
+        await persistMessage(message);
+        return;
+      }
       sessionStats = accumulateUsage(sessionStats, (message as unknown as { usage?: Usage }).usage);
       const text = messageText(message);
-      const record = message as unknown as { stopReason?: string; errorMessage?: string };
       if (text.trim() !== "" || blockStream) {
         settleBlocks(text);
-        const ok = record.stopReason !== "error" && record.stopReason !== "aborted";
-        if (text.trim() !== "" && ok) turnReplied = true;
+        if (text.trim() !== "" && !interrupted) turnReplied = true;
       }
       if (record.stopReason === "error") view.error(record.errorMessage ?? "模型返回错误");
+      // A cancelled or failed reply is shown, never stored: on reload it would
+      // read as a finished turn that the player never got.
+      if (!interrupted) {
+        await persistMessage(message);
+        commitPendingLore();
+        pushWorldState();
+      }
       break;
     }
     case "tool_execution_start": {
@@ -737,6 +915,7 @@ async function handleAgentEvent(event: AgentEvent): Promise<void> {
       break;
     }
     case "agent_end": {
+      commitPendingLore();
       await finishTurn();
       break;
     }
@@ -746,13 +925,17 @@ async function handleAgentEvent(event: AgentEvent): Promise<void> {
 }
 
 async function persistMessage(message: AgentMessage): Promise<void> {
-  if (!activeId) return;
+  // The target session is fixed before the await: a switch mid-write must not
+  // push the line into whichever scene is open when the IPC returns.
+  const id = activeId;
+  if (!id) return;
   try {
-    await Sessions.appendMessage(activeId, JSON.stringify(message));
+    await queueIo(() => Sessions.appendMessage(id, JSON.stringify(message)));
   } catch (error) {
-    view.error("写入对话失败：" + String(error));
+    view.error("写入对话失败：" + readableError(error));
     return;
   }
+  if (id !== activeId) return;
   for (const line of scanMessages([message])) {
     commitSession(
       appendWorldMessage(session, {
@@ -765,45 +948,61 @@ async function persistMessage(message: AgentMessage): Promise<void> {
   }
 }
 
+/** Folds the lore activation of the finished request into the session. */
+function commitPendingLore(): void {
+  const result = pendingLore;
+  pendingLore = null;
+  if (!result) return;
+  commitSession(absorbLore(session, result));
+}
+
 async function finishTurn(): Promise<void> {
-  setRunning(false);
   toolCards.clear();
-  if (turnReplied) {
-    commitSession(advanceTurn(session));
-    commitSession(snapshotTurn(session, session.scene.summary));
-    commitSession(pruneSnapshots(session, 50));
-    await autoTitle();
-  }
-  turnReplied = false;
-  if (pendingRebuild) {
-    pendingRebuild = false;
-    await rebuildAgent(currentTranscript(), "deferred");
-  }
-  if (rewindPending && handle) {
-    rewindPending = false;
-    const clean = sanitizeTranscript(handle.agent.state.messages);
-    handle.agent.state.messages = clean;
-    transcript = clean;
-    try {
-      await Sessions.replaceMessages(
-        session.meta.id,
-        clean.map((message) => JSON.stringify(message)),
-      );
-    } catch (error) {
-      view.error("整理倒流后的对话失败：" + String(error));
+  try {
+    if (turnReplied) {
+      commitSession(advanceTurn(session));
+      commitSession(snapshotTurn(session, session.scene.summary));
+      commitSession(pruneSnapshots(session, 50));
+      await autoTitle();
     }
-  }
-  await saveStateNow();
-  pushWorldState();
-  await refreshSessions();
-  if (needsRerender && handle) {
-    needsRerender = false;
-    renderTranscript(handle.agent.state.messages);
-  }
-  const flags = readFlags();
-  if (flags.showLatency && turnStartedAt > 0) {
-    const seconds = (Date.now() - turnStartedAt) / 1000;
-    view.say("notice", "这一轮用了 " + seconds.toFixed(1) + " 秒");
+    turnReplied = false;
+    if (pendingRebuild) {
+      pendingRebuild = false;
+      await rebuildAgent(currentTranscript(), "deferred");
+    }
+    if (rewindPending && handle) {
+      rewindPending = false;
+      const clean = sanitizeTranscript(handle.agent.state.messages);
+      setTranscript(clean);
+      const id = activeId;
+      if (id) {
+        const lines = clean.map((message) => JSON.stringify(message));
+        try {
+          await queueIo(() => Sessions.replaceMessages(id, lines));
+        } catch (error) {
+          view.error("整理倒流后的对话失败：" + readableError(error));
+        }
+      }
+    }
+    await saveStateNow();
+    pushWorldState();
+    pushMemoryEntries();
+    await refreshSessions();
+    if (needsRerender && handle) {
+      needsRerender = false;
+      renderTranscript(handle.agent.state.messages);
+    }
+    const flags = readFlags();
+    if (flags.showLatency && turnStartedAt > 0) {
+      const seconds = (Date.now() - turnStartedAt) / 1000;
+      view.say("notice", "这一轮用了 " + seconds.toFixed(1) + " 秒");
+    }
+  } finally {
+    // A rewind that never reached a tool call must not end the next turn.
+    rewindRequested = false;
+    // The kernel awaits this handler before it clears its own run, so switching
+    // to idle earlier let a send slip into a run that was still finishing.
+    setRunning(false);
   }
 }
 
@@ -844,60 +1043,146 @@ function nextSessionTitle(): string {
 }
 
 async function openSession(id: string): Promise<void> {
+  // Every await below can outlive the click that started it; a newer open wins
+  // and a stale one returns without committing anything.
+  const token = ++openingToken;
+  const stale = (): boolean => token !== openingToken;
   const found =
     summaries.find((item) => item.id === id) ??
     (await store.listSessions()).find((item) => item.id === id);
-  if (!found) return;
+  if (!found || stale()) return;
   await ensureWorld(found.worldId);
-  const loaded = await store.loadSession(id).catch(() => null);
+  if (stale()) return;
+  let loadError: unknown = null;
+  const loaded = await store.loadSession(id).catch((error) => {
+    loadError = error;
+    return null;
+  });
   if (!loaded) {
-    view.error("打不开会话：" + id);
+    // The host reports why it refused (too large, unreadable transcript, gone);
+    // the previous scene stays open and nothing is written over the broken one.
+    if (!stale()) {
+      const reason = loadError ? readableError(loadError) : "数据可能过大或已损坏";
+      view.error("打不开场次：" + reason + "（" + id + "）");
+    }
     return;
   }
+  if (stale()) return;
   const state = loaded.state;
   sessionStats = normalizeSessionStats((state as { stats?: unknown } | null)?.stats);
   const restored = restoreSession(state, world);
   const parsed = parseAgentMessages(loaded.raw);
-  const projections = restored.messages.length > 0 ? restored.messages : scanMessages(parsed);
+  const scanned = scanMessages(parsed);
+  // New saves store only a header per line; older ones still carry the text.
+  const headers = readProjections(state);
+  const projections = storedLines(state, scanned, restored);
   const next = hydrateSession(state, projections, world);
   // The host summary is authoritative when an older state forgot its header.
   next.meta.id = id;
   if (!next.meta.worldId) next.meta.worldId = found.worldId;
   if (!next.meta.title || next.meta.title === world.name) next.meta.title = found.title;
+  // Turn-scoped bookkeeping from the previous scene must not leak into this one.
+  rewindPending = false;
+  rewindRequested = false;
+  needsRerender = false;
+  pendingRebuild = false;
+  pendingLore = null;
+  turnReplied = false;
+  blockStream = null;
+  blockSeen = 0;
+  toolCards.clear();
+  ignoredCalls.clear();
+  consent.clear("cancelled");
   commitSession(next);
   commitRuntime(runtimeOf(state));
   activeId = id;
-  if (parsed.length === 0) transcript = agentMessagesFrom(projections);
-  else transcript = parsed;
+  transcript = parsed.length === 0 ? agentMessagesFrom(projections) : parsed;
   sections.clear();
   if (runtime.devMode.on) sections.set(ORACLE_SECTION_NAME, ORACLE_SECTION);
   renderTranscript(transcript);
+  // The two files are written independently; a mismatch is shown, not hidden.
+  // World lines only: the transcript also holds tool calls and their results.
+  const stated = headers.length > 0 ? headers.length : restored.messages.length;
+  if (stated > 0 && stated !== scanned.length) {
+    view.say(
+      "notice",
+      "本场次的转录与状态条数不一致（转录 " +
+        scanned.length +
+        " 条 / 状态 " +
+        stated +
+        " 条），已按转录显示。",
+    );
+  }
   pushMemoryEntries();
-  await rebuildAgent(transcript, "session");
+  await rebuildAgent(transcript, "session", token);
+  if (stale()) return;
   if (devMode) devMode.restore(runtime.devMode);
   mirrorDevFlag(runtime.devMode.on);
   pushWorldState();
   await refreshSessions();
+  if (stale()) return;
   input.focus();
 }
 
-async function switchSession(id: string): Promise<void> {
-  if (!ready || !id || id === activeId) return;
-  if (running) await halt();
+/** True while the kernel is still working, even after the status went idle. */
+function busy(): boolean {
+  return running || Boolean(handle?.agent.state.isStreaming);
+}
+
+/** Stops the run and settles queued writes before the session changes. */
+async function settleCurrent(): Promise<void> {
+  if (busy()) await halt();
   await flush();
-  await openSession(id);
+}
+
+/** Runs queued switches one at a time; the last request wins. */
+async function runSwitch(request: SwitchRequest): Promise<void> {
+  switchingSession = true;
+  try {
+    let current: SwitchRequest | null = request;
+    while (current) {
+      await settleCurrent();
+      if (current.kind === "open") await openSession(current.id);
+      else await createSessionCore();
+      const queued = pendingSwitch;
+      pendingSwitch = null;
+      const already = queued?.kind === "open" && queued.id === activeId;
+      current = queued && !already ? queued : null;
+    }
+  } finally {
+    switchingSession = false;
+  }
+}
+
+async function switchSession(id: string): Promise<void> {
+  if (!ready || !id) return;
+  if (switchingSession) {
+    // A switch is already running; remember the newest target instead of racing it.
+    if (id !== activeId) pendingSwitch = { kind: "open", id };
+    return;
+  }
+  if (id === activeId) return;
+  await runSwitch({ kind: "open", id });
 }
 
 async function createNewSession(): Promise<void> {
   if (!ready) return;
-  if (running) await halt();
-  await flush();
+  if (switchingSession) {
+    pendingSwitch = { kind: "new" };
+    return;
+  }
+  await runSwitch({ kind: "new" });
+}
+
+/** Creates a scene and opens it; callers hold the switch lock. */
+async function createSessionCore(): Promise<void> {
+  await settleCurrent();
   const title = nextSessionTitle();
   let summary: SessionSummary;
   try {
     summary = await store.createSession(world.id, title);
   } catch (error) {
-    view.error("新建场次失败：" + String(error));
+    view.error("新建场次失败：" + readableError(error));
     return;
   }
   const fresh = buildSession(world, { id: summary.id, title });
@@ -914,7 +1199,7 @@ async function createNewSession(): Promise<void> {
   try {
     await store.saveSession(withRuntime(fresh, freshRuntime));
   } catch (error) {
-    view.error("保存场次失败：" + String(error));
+    view.error("保存场次失败：" + readableError(error));
   }
   summaries = (await store.listSessions()).filter((item) => item.worldId === world.id);
   await openSession(summary.id);
@@ -930,6 +1215,8 @@ async function renameSession(id: string, title: string): Promise<void> {
     const loaded = await store.loadSession(id).catch(() => null);
     if (!loaded) return;
     const state = restoreSession(loaded.state, world);
+    // Keep the stored line headers: rewriting the state must not drop them.
+    state.messages = storedLines(loaded.state, scanMessages(parseAgentMessages(loaded.raw)), state);
     state.meta.title = trimmed;
     // Renaming another scene keeps the usage numbers it already stored.
     const keptStats = (loaded.state as { stats?: unknown } | null)?.stats;
@@ -939,7 +1226,7 @@ async function renameSession(id: string, title: string): Promise<void> {
         stats: keptStats,
       } as unknown as SessionState);
     } catch (error) {
-      view.error("重命名失败：" + String(error));
+      view.error("重命名失败：" + readableError(error));
       return;
     }
   }
@@ -948,12 +1235,12 @@ async function renameSession(id: string, title: string): Promise<void> {
 
 async function deleteSession(id: string): Promise<void> {
   if (!ready) return;
-  if (id === activeId && running) await halt();
+  if (id === activeId && busy()) await halt();
   if (id === activeId) await flush();
   try {
     await store.removeSession(id);
   } catch (error) {
-    view.error("删除场次失败：" + String(error));
+    view.error("删除场次失败：" + readableError(error));
     return;
   }
   sessionViews.delete(id);
@@ -981,6 +1268,20 @@ function liveSessionMeta(summary: SessionSummary, index: number): SessionMeta {
     updatedAt: Date.parse(summary.updatedAt) || Date.now(),
     state: running ? "streaming" : "idle",
   };
+}
+
+/**
+ * World lines of a stored scene: the transcript supplies the text, the stored
+ * headers supply the ids and turns that snapshots and rewind key on.
+ */
+function storedLines(
+  state: unknown,
+  scanned: readonly WorldMessage[],
+  restored: SessionState,
+): WorldMessage[] {
+  const headers = readProjections(state);
+  if (headers.length > 0) return applyProjections(scanned, headers);
+  return restored.messages.length > 0 ? restored.messages : [...scanned];
 }
 
 function rawPreview(line: string): string {
@@ -1049,6 +1350,13 @@ async function refreshSessions(): Promise<void> {
    World state and clock
    ------------------------------------------------------------------------- */
 
+/** Affection shown and prompted for: the scene overlay, seeded by the world table. */
+function affinityOf(cardId: string): number {
+  const overlay = session.overlays[cardId];
+  if (overlay) return overlay.affinity;
+  return relationOf(world.relations, cardId);
+}
+
 function pushWorldState(): void {
   if (!session || !world) return;
   const minute = runtime.clockMinute || 0;
@@ -1061,11 +1369,9 @@ function pushWorldState(): void {
       id: card.id,
       name: card.name,
       role: roleLabel(card),
-      // The world table is authoritative; the overlay only projects this scene.
-      trust:
-        typeof world.relations?.[card.id] === "number"
-          ? relationOf(world.relations, card.id)
-          : session.overlays[card.id]?.affinity ?? 0,
+      // The scene overlay owns the number, so a rewind rolls it back; the world
+      // table only seeds a new scene.
+      trust: affinityOf(card.id),
     }));
   const state: WorldState & { activeWorldId: string } = {
     name: world.name,
@@ -1140,10 +1446,7 @@ function installMemoryStore(): void {
   useRailStats(() => ({ turn: session.meta.turn, cast: session.meta.cast.length, clock: clockLabel(runtime.clockMinute || 0) }));
   // The editor reads and writes the same relations and overlays the rail shows.
   useAffinityEditor({
-    get: (cardId) =>
-      typeof world.relations?.[cardId] === "number"
-        ? relationOf(world.relations, cardId)
-        : session.overlays[cardId]?.affinity ?? 0,
+    get: (cardId) => affinityOf(cardId),
     set: async (cardId, value) => {
       // applyAffinityEdit ignores cards outside the world; surface that instead.
       if (!world.cards[cardId]) throw new Error("card not in world");
@@ -1235,7 +1538,7 @@ async function switchWorld(id: string): Promise<void> {
   }
   switchingWorld = true;
   try {
-    if (running) await halt();
+    if (busy()) await halt();
     await flush();
     const loaded = await loadLibraryWorld(id).catch(() => null);
     if (!loaded) {
@@ -1247,7 +1550,7 @@ async function switchWorld(id: string): Promise<void> {
     summaries = await store.listSessions().catch(() => []);
     const own = summaries.find((item) => item.worldId === world.id);
     if (own) await openSession(own.id);
-    else await createNewSession();
+    else await createSessionCore();
     await refreshLibrary();
     pushWorldState();
     await refreshSessions();
@@ -1540,7 +1843,8 @@ async function toggleDev(source: DevEntrySource): Promise<void> {
    ------------------------------------------------------------------------- */
 
 async function applyConfig(next: Config): Promise<void> {
-  const previous = config;
+  // A save can land before the first load finishes; compare against defaults.
+  const previous = config ?? defaultConfig();
   config = { ...next };
   if (!ready) return;
   const keys = [
@@ -1578,13 +1882,16 @@ function onFlagsChanged(): void {
 }
 
 function reportFailure(prefix: string, error: unknown): void {
-  view.error(prefix + String(error));
+  view.error(prefix + readableError(error));
 }
 
 function bindChannels(): void {
   document.addEventListener("applecos:config", (event) => {
-    const detail = (event as CustomEvent<Config & { reason?: string }>).detail;
-    if (detail) void applyConfig(detail).catch((error) => reportFailure("应用设置失败：", error));
+    // The event is only a signal; the saved config is read from its owner so
+    // the API key never travels through a document-wide CustomEvent.
+    const detail = (event as CustomEvent<{ reason?: string } | undefined>).detail;
+    if (!detail) return;
+    void applyConfig(readConfig()).catch((error) => reportFailure("应用设置失败：", error));
   });
   document.addEventListener("applecos:flags", () => onFlagsChanged());
   document.addEventListener("applecos:library-edit", (event) => {
@@ -1612,6 +1919,18 @@ function bindChannels(): void {
     event.preventDefault();
     void toggleDev("shortcut");
   });
+  document.addEventListener("applecos:prepare-quit", () => {
+    // The settings module asks the runtime to settle before the window closes.
+    void shutdown();
+  });
+  window.addEventListener("beforeunload", () => {
+    // Closing the window skips the in-app quit chain: stop the stream and make
+    // a best-effort write so the last turn's state is not lost silently.
+    consent.clear("cancelled");
+    if (handle?.agent.state.isStreaming) handle.agent.abort();
+    void saveStateNow();
+    void saveWorldNow();
+  });
 }
 
 /* -------------------------------------------------------------------------
@@ -1620,30 +1939,44 @@ function bindChannels(): void {
 
 let consentBridgeBound = false;
 
+/** Request id carried by a confirmation click; empty when the card had none. */
+function consentRequestId(event: Event): string {
+  const detail = (event as CustomEvent<{ id?: string; requestId?: string } | undefined>).detail;
+  return detail?.requestId ?? detail?.id ?? "";
+}
+
 function bindConsent(): void {
   consent.bind(
     (request) =>
       new Promise<"deferred">((resolve) => {
-        const card = view.confirm({
+        view.confirm({
           title: request.label + " · " + (TOOL_LABELS[request.tool] ?? request.tool),
           body: request.details ? request.summary + "\n\n" + request.details : request.summary,
           name: request.tool,
+          // The card carries the request it answers, so an old card can never
+          // approve a later request that replaced it.
+          requestId: request.id,
+          timeoutMs: request.timeoutMs,
           approve: () => resolve("deferred"),
           deny: () => resolve("deferred"),
         });
-        // A dismissed request must not leave a card behind.
-        card.dataset.request = request.id;
       }),
   );
   if (consentBridgeBound) return;
   consentBridgeBound = true;
-  document.addEventListener("applecos:tool-approve", () => {
-    const active = consent.current();
-    if (active) consent.allow(active.id);
+  // Every settlement, timeout included, retires the card that asked for it.
+  consent.onSettled((request, outcome) => {
+    const state = outcome === "allow" ? "approved" : outcome === "deny" ? "denied" : "expired";
+    view.resolveConfirm(request.id, state);
   });
-  document.addEventListener("applecos:tool-deny", () => {
-    const active = consent.current();
-    if (active) consent.deny(active.id);
+  document.addEventListener("applecos:tool-approve", (event) => {
+    const id = consentRequestId(event);
+    // allow() only answers the active request; a stale card's click is ignored.
+    if (id) consent.allow(id);
+  });
+  document.addEventListener("applecos:tool-deny", (event) => {
+    const id = consentRequestId(event);
+    if (id) consent.deny(id);
   });
 }
 
@@ -1697,6 +2030,7 @@ async function halt(): Promise<void> {
 }
 
 async function send(): Promise<void> {
+  if (!ready) return;
   const text = input.value.trim();
   if (!text) return;
   if (text === "/神谕" || text.startsWith("/神谕 ")) {
@@ -1706,7 +2040,12 @@ async function send(): Promise<void> {
     await toggleDev("slash");
     return;
   }
-  if (running) return;
+  if (busy()) {
+    // The kernel awaits this turn's listeners before it clears its own run, so
+    // waiting here is what turns a click in the closing beat into a normal send.
+    if (handle) await handle.agent.waitForIdle().catch(() => undefined);
+    if (busy()) return;
+  }
   if (!handle) {
     await rebuildAgent(currentTranscript(), "retry");
     if (!handle) {
@@ -1717,14 +2056,21 @@ async function send(): Promise<void> {
   input.value = "";
   grow();
   syncSend();
+  rewindRequested = false;
   turnReplied = false;
   turnStartedAt = Date.now();
   setRunning(true);
   try {
     await handle.agent.prompt(text);
   } catch (error) {
-    view.error("发送失败：" + String(error));
+    view.error("发送失败：" + readableError(error));
+    // The line must not vanish; put it back so it can be sent again.
+    if (input.value.trim() === "") {
+      input.value = text;
+      grow();
+    }
     setRunning(false);
+    syncSend();
   }
 }
 
@@ -1738,10 +2084,11 @@ function bindUi(): void {
     syncSend();
   });
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void send();
-    }
+    if (event.key !== "Enter" || event.shiftKey) return;
+    // Enter commits an IME candidate; sending here would swallow the line.
+    if (event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    void send();
   });
   sendButton.addEventListener("click", () => {
     if (running) {
@@ -1754,6 +2101,38 @@ function bindUi(): void {
   $("#open-settings").addEventListener("click", () => void openSettings());
 }
 
+/** Settles the story before the window goes away; runs at most once. */
+let shutdownRun: Promise<void> | null = null;
+
+async function runShutdown(): Promise<void> {
+  consent.clear("cancelled");
+  if (!ready) return;
+  await halt();
+  await flush();
+  await worldSaveChain.catch(() => undefined);
+  await saveStateNow();
+  await saveWorldNow();
+}
+
+function shutdown(): Promise<void> {
+  if (!shutdownRun) shutdownRun = runShutdown().catch(() => undefined);
+  return shutdownRun;
+}
+
+/** Hears the host's pre-quit event; the client may not expose a helper for it. */
+function subscribeQuitSignal(): void {
+  try {
+    if (!isMyGo()) return;
+    // Generated event from the Go binding; the host closes shortly after it.
+    events.appBeforeQuit.on(() => {
+      // The host waits briefly, then closes regardless: keep this path short.
+      void shutdown();
+    });
+  } catch {
+    // No host runtime (plain vite dev): nothing will close the window here.
+  }
+}
+
 function registerHandlers(): void {
   useSessionHandlers({
     create: () => createNewSession(),
@@ -1763,16 +2142,7 @@ function registerHandlers(): void {
   });
   useClockHandler({ set: (minutes, phase) => setClock(minutes, phase) });
   useQuitHandler(async () => {
-    if (!ready) {
-      await quitApp();
-      return;
-    }
-    consent.clear("cancelled");
-    await halt();
-    await flush();
-    await worldSaveChain.catch(() => undefined);
-    await saveStateNow();
-    await saveWorldNow();
+    await shutdown();
     await quitApp();
   });
 }
@@ -1812,6 +2182,7 @@ async function boot(): Promise<void> {
   bindUi();
   bindConsent();
   bindChannels();
+  subscribeQuitSignal();
   initSettings();
 
   try {
@@ -1843,5 +2214,5 @@ async function boot(): Promise<void> {
 }
 
 void boot().catch((error) => {
-  view.error("启动失败：" + String(error));
+  view.error("启动失败：" + readableError(error));
 });

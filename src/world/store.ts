@@ -4,6 +4,8 @@
 // The store is an interface so screens never call the client directly and a
 // local-storage backend can stand in during `vite dev`.
 
+import { isMyGo } from "mygo-runtime";
+
 import {
   Library,
   Sessions,
@@ -13,8 +15,15 @@ import {
 } from "../mygo";
 
 import { normalizeCard } from "./card";
-import { restoreMessage } from "./session";
-import { createId, type CharacterCard, type SessionState, type World, type WorldMessage } from "./types";
+import { projectMessages, restoreMessage, slimSnapshots } from "./session";
+import {
+  createId,
+  normalizePlayer,
+  type CharacterCard,
+  type SessionState,
+  type World,
+  type WorldMessage,
+} from "./types";
 
 /** A conversation as loaded from disk, state still unnormalized. */
 export interface LoadedSession {
@@ -82,13 +91,29 @@ function parseJson<T>(body: string | null | undefined): T | null {
   }
 }
 
-/** Loads a world and normalizes every embedded card. */
+function textOf(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+/**
+ * Loads a world and normalizes every embedded card. Scalar fields are coerced
+ * too: a hand-edited null must not reach the prompt builder, which trims them.
+ */
 export function normalizeWorld(raw: World): World {
   const cards: Record<string, CharacterCard> = {};
   for (const [id, card] of Object.entries(raw.cards ?? {})) {
     cards[id] = normalizeCard(card?.raw ?? card, { id, bookId: `${id}_book` });
   }
-  return { ...raw, cards };
+  return {
+    ...raw,
+    name: textOf(raw.name),
+    summary: textOf(raw.summary),
+    setting: textOf(raw.setting),
+    rules: textOf(raw.rules),
+    narratorId: textOf(raw.narratorId),
+    player: normalizePlayer(raw.player),
+    cards,
+  };
 }
 
 /** Parses stored transcript lines; malformed lines are skipped. */
@@ -155,13 +180,26 @@ export function createGoStore(
       };
     },
     async saveSession(session) {
-      // The host reads title and worldId from the top level of session.json, so
-      // mirror them beside the nested meta. The text projection stays too: it
-      // carries message ids and turns, which rewind needs after a reload.
+      // The host reads title, worldId and the timestamps from the top level of
+      // session.json, so mirror them beside the nested meta. Timestamps go out
+      // as ISO strings, the shape Sessions.Create writes; the host probe reads
+      // strings, so a numeric mirror would blank the whole summary.
+      //
+      // The text lives in messages.jsonl only. This file keeps a header per
+      // line (ids and turns, which the transcript cannot carry) and elides
+      // snapshot memory that repeats, so the state stays far below the size cap.
+      const lastMessage = session.messages[session.messages.length - 1];
       const state = {
         ...session,
+        messages: undefined,
+        projection: projectMessages(session.messages),
+        turns: slimSnapshots(session.turns),
         title: session.meta.title,
         worldId: session.meta.worldId,
+        createdAt: isoOf(session.meta.createdAt),
+        updatedAt: isoOf(session.meta.updatedAt),
+        messageCount: session.messages.length,
+        lastMessageId: lastMessage ? lastMessage.id : "",
       };
       return sessions.saveState(session.meta.id, JSON.stringify(state));
     },
@@ -405,7 +443,7 @@ let current: WorldStore | null = null;
 
 /** The store every screen shares: the host library once IPC exists. */
 export function getStore(): WorldStore {
-  if (!current) current = createGoStore();
+  if (!current) current = isMyGo() ? createGoStore() : createLocalStore();
   return current;
 }
 

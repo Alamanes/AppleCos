@@ -5,7 +5,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { applyMacros, macroContext, type MacroContext } from "./card";
 import { activateLore, type LoreActivationOptions } from "./lorebook";
-import { summarizeMemory } from "./memory";
+import { summarizeMemoryReport } from "./memory";
 import { DEFAULT_PLAYER_NAME } from "./types";
 import type {
   CharacterCard,
@@ -131,12 +131,19 @@ export interface TransformContextOptions {
   onSections?: (sections: PromptSection[]) => void;
   /** Final hook after assembly, for callers that need their own touch. */
   adjust?: (messages: AgentMessage[]) => AgentMessage[];
+  /** Reports an assembly failure, after the minimal fallback prompt is used. */
+  onError?: (error: unknown) => void;
 }
 
 type Dict = Record<string, unknown>;
 
 function asDict(value: unknown): Dict {
   return typeof value === "object" && value !== null ? (value as Dict) : {};
+}
+
+/** Text of a stored field; a null or non-string must never break assembly. */
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 /** Role of a Pi message, or "" for shapes we do not know. */
@@ -271,12 +278,8 @@ function affinityBlock(value: number): string {
   );
 }
 
-function cardBlock(
-  card: CharacterCard,
-  player: PlayerIdentity,
-  overlay: CharacterOverlay | undefined,
-  macros: MacroContext,
-): string {
+/** Card fields only: everything here is authored text and stays cacheable. */
+function cardBlock(card: CharacterCard, macros: MacroContext): string {
   const parts: string[] = [];
   if (card.description.trim()) parts.push(`设定与经历：\n${applyMacros(card.description, macros)}`);
   if (card.personality.trim()) parts.push(`性格：${applyMacros(card.personality, macros)}`);
@@ -285,15 +288,22 @@ function cardBlock(
   if (card.exampleDialogue.trim()) {
     parts.push(`说话示例：\n${applyMacros(card.exampleDialogue, macros)}`);
   }
-  if (overlay) {
-    // Affection is written for every overlay, so neutral still reads as a stance.
-    parts.push(affinityBlock(overlay.affinity));
-    const live: string[] = [];
-    if (overlay.relationship.trim()) live.push(`与玩家的关系：${overlay.relationship.trim()}`);
-    if (overlay.tags.length > 0) live.push(`当前状态：${overlay.tags.join("、")}`);
-    for (const note of overlay.notes) if (note.trim() !== "") live.push(`- ${note.trim()}`);
-    if (live.length > 0) parts.push(live.join("\n"));
-  }
+  return `### ${card.name}\n${joinBlocks(parts)}`;
+}
+
+/**
+ * Per-scene character state. It changes whenever a tool or the rail edits an
+ * overlay, so it is a dynamic section and never shifts the cached prefix.
+ */
+function overlayBlock(card: CharacterCard, overlay: CharacterOverlay): string {
+  const parts: string[] = [];
+  // Affection is written for every overlay, so neutral still reads as a stance.
+  parts.push(affinityBlock(overlay.affinity));
+  const live: string[] = [];
+  if (overlay.relationship.trim()) live.push(`与玩家的关系：${overlay.relationship.trim()}`);
+  if (overlay.tags.length > 0) live.push(`当前状态：${overlay.tags.join("、")}`);
+  for (const note of overlay.notes) if (note.trim() !== "") live.push(`- ${note.trim()}`);
+  if (live.length > 0) parts.push(live.join("\n"));
   return `### ${card.name}\n${joinBlocks(parts)}`;
 }
 
@@ -306,32 +316,48 @@ export function buildSections(inputs: PromptInputs): PromptSection[] {
   const names = { ...(inputs.names ?? {}) };
   for (const card of inputs.cards) names[card.id] = card.name;
 
+  const summary = str(inputs.world.summary);
+  const setting = str(inputs.world.setting);
+  const rules = str(inputs.world.rules);
   const worldParts: string[] = [];
-  if (inputs.world.summary.trim()) worldParts.push(applyMacros(inputs.world.summary, stable));
-  if (inputs.world.setting.trim()) worldParts.push(applyMacros(inputs.world.setting, stable));
-  if (inputs.world.rules.trim()) {
-    worldParts.push(`世界规则：\n${applyMacros(inputs.world.rules, stable)}`);
+  if (summary.trim()) worldParts.push(applyMacros(summary, stable));
+  if (setting.trim()) worldParts.push(applyMacros(setting, stable));
+  if (rules.trim()) {
+    worldParts.push(`世界规则：\n${applyMacros(rules, stable)}`);
   }
 
   const loreBefore = wrapLore((inputs.lore?.before ?? []).map((text) => applyMacros(text, macros)));
   const loreAfter = wrapLore((inputs.lore?.after ?? []).map((text) => applyMacros(text, macros)));
 
   // A dead card never reaches the cast block, even if the cast list still names it.
-  const castParts = inputs.cards
-    .filter((card) => inputs.overlays?.[card.id]?.deceased !== true)
-    .map((card) => cardBlock(card, inputs.player, inputs.overlays?.[card.id], stable));
+  const live = inputs.cards.filter((card) => inputs.overlays?.[card.id]?.deceased !== true);
+  const castParts = live.map((card) => cardBlock(card, stable));
+  const stateParts: string[] = [];
+  for (const card of live) {
+    const overlay = inputs.overlays?.[card.id];
+    if (overlay) stateParts.push(overlayBlock(card, overlay));
+  }
 
-  const memoryText = summarizeMemory(inputs.memory, {
+  const memory = summarizeMemoryReport(inputs.memory, {
     budgetChars: MEMORY_BUDGET_CHARS,
     names,
   });
+  // Say out loud what the budget hid, so the model can ask for it instead of
+  // quietly forgetting it.
+  const memoryText =
+    memory.omitted > 0
+      ? joinBlocks([
+          memory.text,
+          `（另有 ${memory.omitted} 条记忆没有载入本轮，需要时可用 recall 取回。）`,
+        ])
+      : memory.text;
 
   const scene = inputs.scene;
   const sceneText = scene
     ? joinBlocks([
-        scene.location ? `地点：${scene.location}` : "",
-        scene.time ? `时间：${scene.time}` : "",
-        scene.summary ? `近况：${scene.summary}` : "",
+        str(scene.location) ? `地点：${str(scene.location)}` : "",
+        str(scene.time) ? `时间：${str(scene.time)}` : "",
+        str(scene.summary) ? `近况：${str(scene.summary)}` : "",
       ])
     : "";
 
@@ -341,9 +367,11 @@ export function buildSections(inputs: PromptInputs): PromptSection[] {
     { title: "世界书 · 前置", body: loreBefore, dynamic: true },
     { title: "出场角色", body: castParts.join("\n\n") },
     { title: "世界书 · 补充", body: loreAfter, dynamic: true },
+    // Affection and live tags change every turn, so they live outside the prefix.
+    { title: "角色现状", body: stateParts.join("\n\n"), dynamic: true },
     { title: "记忆", body: memoryText, dynamic: true },
     { title: "当前场景", body: sceneText, dynamic: true },
-    { title: "附加要求", body: (inputs.instructions ?? "").trim() },
+    { title: "附加要求", body: str(inputs.instructions).trim() },
     { title: "设定工具", body: TOOL_GUIDE },
     { title: "判定规则", body: JUDGE_RULES },
     {
@@ -567,9 +595,16 @@ export function createTransformContext(
       next = injectDynamicPrompt(next, dynamicPromptFromSections(sections));
       options.onLore?.(active);
       return options.adjust ? options.adjust(next) : next;
-    } catch {
-      // The hook must never fail a request; fall back to the raw context.
-      return messages;
+    } catch (error) {
+      // A broken world file must not hand the model a bare transcript: keep the
+      // narrator contract and the reply format, and report what went wrong.
+      options.onError?.(error);
+      try {
+        const fallback = `# 演出规则\n\n${NARRATOR_RULES}\n\n## 输出格式\n${OUTPUT_FORMAT_RULES}`;
+        return withSystemPrompt(messages, fallback);
+      } catch {
+        return messages;
+      }
     }
   };
 }

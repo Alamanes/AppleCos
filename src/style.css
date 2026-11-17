@@ -87,7 +87,7 @@
     --line-strong: rgb(255 255 255 / 0.15);
     --accent: #8e88e8;
     --accent-fill: #6d67ce;
-    --accent-fill-hover: #7a74d9;
+    --accent-fill-hover: #6058c2;
     --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
     --danger: #e2837b;
 
@@ -1355,7 +1355,8 @@ textarea.field {
   --line-strong: rgb(255 255 255 / 0.15);
   --accent: #8e88e8;
   --accent-fill: #6d67ce;
-  --accent-fill-hover: #7a74d9;
+  /* Hover darkens: a lighter fill drops white labels under 4.5:1. */
+  --accent-fill-hover: #6058c2;
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --on-accent: #ffffff;
   --danger: #e2837b;
@@ -2210,17 +2211,35 @@ textarea.field {
   vertical-align: middle;
 }
 
+.session-row {
+  position: relative;
+  display: grid;
+}
+
+/* The actions sit beside the row button, so they stay out of its tab and name.
+   They fade instead of unmounting, which keeps them reachable with Tab. */
 .session-tools {
   position: absolute;
   top: 4px;
   right: 5px;
-  display: none;
+  display: flex;
   gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
 
-.session-item:hover .session-tools,
-.session-item.selected .session-tools {
-  display: flex;
+.session-row:hover .session-tools,
+.session-row:focus-within .session-tools,
+.session-item.selected ~ .session-tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* A switch in flight must not queue a second one. */
+.session-list[aria-busy="true"] {
+  pointer-events: none;
+  opacity: 0.65;
 }
 
 .session-tool {
@@ -2996,6 +3015,31 @@ textarea.field {
   color: var(--danger);
 }
 
+/* Destructive step asked in place: message plus cancel and one clear action. */
+.editor-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 0 100%;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.editor-confirm-note {
+  flex: 1;
+  min-width: 0;
+  font: 400 0.74rem/1.5 var(--sans);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.editor-foot {
+  flex-wrap: wrap;
+}
+
 /* ==========================================================================
    World book manager: book bar, toolbar, virtual list, bulk bar and detail
    ========================================================================== */
@@ -3725,6 +3769,32 @@ textarea.field {
   opacity: 0.75;
 }
 
+/* A request the queue already settled: grey, closed, unmistakably over. */
+.confirm-card[data-state="expired"] {
+  border-color: var(--line);
+  background: transparent;
+  opacity: 0.6;
+}
+
+.confirm-note {
+  margin: 6px 0 0;
+  font: 400 0.72rem/1.6 var(--sans);
+  color: var(--muted);
+}
+
+/* Readable by screen readers, invisible on screen: the transcript announcer. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* God-mode line: the operator speaking over the world. */
 .line.god .speech {
   padding: 7px 11px;
@@ -4314,6 +4384,8 @@ details.lore-advanced > summary.lore-section-title:hover {
   font: 400 0.72rem/1.6 var(--font-data);
   color: var(--text-dim);
   white-space: pre-wrap;
+  /* Model output may be one long token: wrap it instead of clipping. */
+  overflow-wrap: anywhere;
 }
 
 .tool-status {

@@ -31,8 +31,21 @@ import type { EditorKind, Entry, Library as LibraryView } from "./settings";
 
 type Raw = Record<string, unknown>;
 
+/** Must stay in step with idPattern in store.go; Go rejects anything else. */
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const LEGACY_KEY = "applecos.library";
+
+/**
+ * Host failures arrive as plain strings, so a missing file is recognised by its
+ * wording. Several markers keep a rewording on the Go side from turning "new
+ * book" into a hard error.
+ */
+const NOT_FOUND_MARKERS = ["找不到", "不存在", "not found"];
+
+function isNotFoundError(error: unknown): boolean {
+  const text = String(error).toLowerCase();
+  return NOT_FOUND_MARKERS.some((marker) => text.includes(marker));
+}
 
 function asRecord(value: unknown): Raw {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Raw) : {};
@@ -421,7 +434,7 @@ export async function loadLoreDocumentById(
     text = await Library.loadLorebook(id);
   } catch (error) {
     // Missing file means a new book; every other failure must surface.
-    if (String(error).includes("找不到")) return null;
+    if (isNotFoundError(error)) return null;
     throw error;
   }
   const parsed = parseLoreDocument(text, safeId(id, "lorebook"), id);
@@ -687,71 +700,73 @@ async function migrateLegacy(): Promise<void> {
   }
   if (!stored) return;
 
+  // Migration is id based: an entry that already exists is skipped, everything
+  // else still arrives. "Only when the library is empty" loses those entries as
+  // soon as one item is created by hand.
   const worlds = await Library.listWorlds().catch(() => []);
-  const legacyWorlds = legacyEntries(stored, "world");
-  if (worlds.length === 0 && legacyWorlds.length > 0) {
-    const legacy = legacyWorlds[0];
-    if (legacy) {
-      const id = safeId(legacy.id ?? "", "world");
-      const world = createWorldScaffold(id, legacy.title ?? "世界");
-      const place = (legacy.extra?.place ?? "").trim();
-      world.setting = [place ? "开场地点：" + place : "", legacy.body ?? ""]
-        .filter((line) => line.trim() !== "")
-        .join("\n");
-      world.summary = (legacy.extra?.tagline ?? "").trim();
-      await Library.saveWorld(id, JSON.stringify(world)).catch(() => undefined);
-    }
+  const worldIds = new Set(worlds.map((artifact) => artifact.id));
+  for (const legacy of legacyEntries(stored, "world")) {
+    const id = safeId(legacy.id ?? "", "world");
+    if (worldIds.has(id)) continue;
+    const world = createWorldScaffold(id, legacy.title ?? "世界");
+    const place = (legacy.extra?.place ?? "").trim();
+    world.setting = [place ? "开场地点：" + place : "", legacy.body ?? ""]
+      .filter((line) => line.trim() !== "")
+      .join("\n");
+    world.summary = (legacy.extra?.tagline ?? "").trim();
+    await Library.saveWorld(id, JSON.stringify(world)).catch(() => undefined);
+    worldIds.add(id);
   }
 
   const cards = await Library.listCards().catch(() => []);
-  const legacyCards = legacyEntries(stored, "character");
-  if (cards.length === 0) {
-    for (const legacy of legacyCards) {
-      const id = safeId(legacy.id ?? "", "card");
-      const payload = {
-        spec: "chara_card_v2",
-        spec_version: "2.0",
-        data: {
-          name: legacy.title ?? "无名角色",
-          description: legacy.body ?? "",
-          personality: (legacy.tags ?? []).join("、"),
-          scenario: legacy.extra?.relation ?? "",
-          tags: legacy.tags ?? [],
-          first_mes: "",
-          mes_example: "",
-          system_prompt: "",
-          post_history_instructions: "",
-          alternate_greetings: [],
-          creator: "AppleCos",
-          character_version: "1",
-        },
-      };
-      await Library.saveCard(id, JSON.stringify(payload)).catch(() => undefined);
-    }
+  const cardIds = new Set(cards.map((artifact) => artifact.id));
+  for (const legacy of legacyEntries(stored, "character")) {
+    const id = safeId(legacy.id ?? "", "card");
+    if (cardIds.has(id)) continue;
+    const payload = {
+      spec: "chara_card_v2",
+      spec_version: "2.0",
+      data: {
+        name: legacy.title ?? "无名角色",
+        description: legacy.body ?? "",
+        personality: (legacy.tags ?? []).join("、"),
+        scenario: legacy.extra?.relation ?? "",
+        tags: legacy.tags ?? [],
+        first_mes: "",
+        mes_example: "",
+        system_prompt: "",
+        post_history_instructions: "",
+        alternate_greetings: [],
+        creator: "AppleCos",
+        character_version: "1",
+      },
+    };
+    await Library.saveCard(id, JSON.stringify(payload)).catch(() => undefined);
+    cardIds.add(id);
   }
 
   const books = await Library.listLorebooks().catch(() => []);
-  const legacyLore = legacyEntries(stored, "lore");
-  if (books.length === 0) {
-    for (const legacy of legacyLore) {
-      const id = safeId(legacy.id ?? "", "lorebook");
-      const book: Lorebook = {
-        id,
-        name: legacy.title ?? "世界书",
-        entries: entriesToArray([
-          {
-            id,
-            comment: legacy.title ?? "世界书",
-            keys: legacy.tags ?? [],
-            content: legacy.body ?? "",
-          },
-        ]),
-        scanDepth: 4,
-        budgetChars: 1200,
-        recursive: true,
-      };
-      await Library.saveLorebook(id, JSON.stringify(stBook(book))).catch(() => undefined);
-    }
+  const bookIds = new Set(books.map((artifact) => artifact.id));
+  for (const legacy of legacyEntries(stored, "lore")) {
+    const id = safeId(legacy.id ?? "", "lorebook");
+    if (bookIds.has(id)) continue;
+    const book: Lorebook = {
+      id,
+      name: legacy.title ?? "世界书",
+      entries: entriesToArray([
+        {
+          id,
+          comment: legacy.title ?? "世界书",
+          keys: legacy.tags ?? [],
+          content: legacy.body ?? "",
+        },
+      ]),
+      scanDepth: 4,
+      budgetChars: 1200,
+      recursive: true,
+    };
+    await Library.saveLorebook(id, JSON.stringify(stBook(book))).catch(() => undefined);
+    bookIds.add(id);
   }
 }
 

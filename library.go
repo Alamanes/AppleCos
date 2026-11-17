@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -74,7 +76,11 @@ func (Library) SaveCard(id string, raw string) (string, error) {
 	}
 	finalID := strings.TrimSpace(id)
 	if finalID == "" {
-		finalID = cardSlug(summary.Name) + "-" + randomHex(6)
+		suffix, err := randomHex(6)
+		if err != nil {
+			return "", err
+		}
+		finalID = cardSlug(summary.Name) + "-" + suffix
 	}
 	path, err := artifactPath(cardKind, finalID)
 	if err != nil {
@@ -121,21 +127,36 @@ func (Library) ImportLorebook() (Artifact, error) {
 	if len(paths) == 0 {
 		return Artifact{}, nil
 	}
-	return Library{}.ImportLorebookFile(paths[0])
+	return importLorebookFromPath(paths[0])
 }
 
-// ImportLorebookFile imports a world book from a path, without a file picker.
-func (Library) ImportLorebookFile(path string) (Artifact, error) {
-	info, err := os.Stat(path)
+// ImportLorebookFile imports a world book from a path relative to the app's
+// inbox folder. A player picks any file through ImportLorebook; this endpoint
+// never reaches outside the data directory.
+func (Library) ImportLorebookFile(rel string) (Artifact, error) {
+	root, err := inboxDir()
 	if err != nil {
 		return Artifact{}, err
+	}
+	path, err := resolveInside(root, rel)
+	if err != nil {
+		return Artifact{}, err
+	}
+	return importLorebookFromPath(path)
+}
+
+// importLorebookFromPath stores the world book file at an absolute path.
+func importLorebookFromPath(path string) (Artifact, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return Artifact{}, publicError(err)
 	}
 	if info.IsDir() {
 		return Artifact{}, errors.New("请选择一个世界书文件")
 	}
 	data, err := readLimited(path, maxImportBytes)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, publicError(err)
 	}
 	clean, err := decodeJSONObject(string(data), maxArtifactBytes)
 	if err != nil {
@@ -150,7 +171,11 @@ func (Library) ImportLorebookFile(path string) (Artifact, error) {
 	if id == "" {
 		id = "lorebook"
 	}
-	id = id + "-" + randomHex(6)
+	suffix, err := randomHex(6)
+	if err != nil {
+		return Artifact{}, err
+	}
+	id = id + "-" + suffix
 	dest, err := artifactPath(lorebookKind, id)
 	if err != nil {
 		return Artifact{}, err
@@ -169,11 +194,11 @@ func (Library) LorebookArtifact(id string) (Artifact, error) {
 	}
 	raw, err := readLimited(path, maxArtifactBytes)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, fmt.Errorf("世界书读取失败：%w", publicError(err))
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return Artifact{}, err
+		return Artifact{}, publicError(err)
 	}
 	name, detail := summarizeArtifact(lorebookKind, raw)
 	if name == "" {
@@ -328,27 +353,46 @@ func (Library) ImportCard() (CardSummary, error) {
 	if len(paths) == 0 {
 		return CardSummary{}, nil
 	}
-	return Library{}.ImportCardFile(paths[0])
+	return importCardFromPath(paths[0])
 }
 
-// ImportCardFile imports a card from a path, without a file picker.
-func (Library) ImportCardFile(path string) (CardSummary, error) {
-	info, err := os.Stat(path)
+// ImportCardFile imports a card from a path relative to the app's inbox
+// folder. A player picks any file through ImportCard; this endpoint never
+// reaches outside the data directory.
+func (Library) ImportCardFile(rel string) (CardSummary, error) {
+	root, err := inboxDir()
 	if err != nil {
 		return CardSummary{}, err
+	}
+	path, err := resolveInside(root, rel)
+	if err != nil {
+		return CardSummary{}, err
+	}
+	return importCardFromPath(path)
+}
+
+// importCardFromPath stores the card file at an absolute path.
+func importCardFromPath(path string) (CardSummary, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return CardSummary{}, publicError(err)
 	}
 	if info.IsDir() {
 		return CardSummary{}, errors.New("请选择一个角色卡文件")
 	}
 	data, err := readLimited(path, maxImportBytes)
 	if err != nil {
-		return CardSummary{}, err
+		return CardSummary{}, publicError(err)
 	}
 	normalized, summary, err := normalizeCard(data, "")
 	if err != nil {
 		return CardSummary{}, fmt.Errorf("导入失败：%w", err)
 	}
-	id := cardSlug(summary.Name) + "-" + randomHex(6)
+	suffix, err := randomHex(6)
+	if err != nil {
+		return CardSummary{}, err
+	}
+	id := cardSlug(summary.Name) + "-" + suffix
 	dest, err := artifactPath(cardKind, id)
 	if err != nil {
 		return CardSummary{}, err
@@ -387,11 +431,25 @@ func (Library) ExportCard(id string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", nil
 	}
-	return Library{}.ExportCardTo(id, path)
+	return exportCardToPath(id, path)
 }
 
-// ExportCardTo writes the card as V3 JSON at path, without a save panel.
-func (Library) ExportCardTo(id string, path string) (string, error) {
+// ExportCardTo writes the card as V3 JSON into the app's exports folder, at a
+// path relative to it. ExportCard is the way to save anywhere on disk.
+func (Library) ExportCardTo(id string, rel string) (string, error) {
+	root, err := exportDir()
+	if err != nil {
+		return "", err
+	}
+	target, err := resolveInside(root, rel)
+	if err != nil {
+		return "", err
+	}
+	return exportCardToPath(id, target)
+}
+
+// exportCardToPath writes the card at an absolute path.
+func exportCardToPath(id string, path string) (string, error) {
 	raw, err := loadArtifact(cardKind, id)
 	if err != nil {
 		return "", err
@@ -411,6 +469,13 @@ func (Library) ExportCardTo(id string, path string) (string, error) {
 	}
 	return target, nil
 }
+
+// inboxDir is where files wait to be imported without a file picker: the only
+// folder the page may name when it imports a file directly.
+func inboxDir() (string, error) { return appDir("inbox") }
+
+// exportDir is the only folder the page may write to without a save panel.
+func exportDir() (string, error) { return appDir("exports") }
 
 // artifactPath resolves a validated id to a file in the library.
 func artifactPath(kind artifactKind, id string) (string, error) {
@@ -454,9 +519,7 @@ func listArtifacts(kind artifactKind) ([]Artifact, error) {
 			Bytes:     info.Size(),
 			UpdatedAt: info.ModTime(),
 		}
-		if raw, err := readLimited(filepath.Join(dir, entry.Name()), maxArtifactBytes); err == nil {
-			artifact.Name, artifact.Detail = summarizeArtifact(kind, raw)
-		}
+		artifact.Name, artifact.Detail = cachedArtifactSummary(kind, filepath.Join(dir, entry.Name()), info)
 		if artifact.Name == "" {
 			artifact.Name = id
 		}
@@ -466,6 +529,49 @@ func listArtifacts(kind artifactKind) ([]Artifact, error) {
 		return list[i].UpdatedAt.After(list[j].UpdatedAt)
 	})
 	return list, nil
+}
+
+// cachedArtifact is one parsed library entry, kept until the file changes.
+type cachedArtifact struct {
+	size   int64
+	mod    time.Time
+	name   string
+	detail string
+}
+
+// artifactSummaries caches list entries by path, so refreshing the library
+// does not re-read and re-parse every file.
+var artifactSummaries struct {
+	mu      sync.Mutex
+	entries map[string]cachedArtifact
+}
+
+// cachedArtifactSummary returns the display name and detail of one file,
+// parsing it only when its size or modification time changed.
+func cachedArtifactSummary(kind artifactKind, path string, info fs.FileInfo) (string, string) {
+	artifactSummaries.mu.Lock()
+	cached, ok := artifactSummaries.entries[path]
+	artifactSummaries.mu.Unlock()
+	if ok && cached.size == info.Size() && cached.mod.Equal(info.ModTime()) {
+		return cached.name, cached.detail
+	}
+	var name, detail string
+	raw, err := readLimited(path, maxArtifactBytes)
+	switch {
+	case err == nil:
+		name, detail = summarizeArtifact(kind, raw)
+	case errors.Is(err, errTooLarge):
+		detail = "文件过大，无法读取"
+	default:
+		detail = "文件无法读取"
+	}
+	artifactSummaries.mu.Lock()
+	if artifactSummaries.entries == nil {
+		artifactSummaries.entries = make(map[string]cachedArtifact)
+	}
+	artifactSummaries.entries[path] = cachedArtifact{size: info.Size(), mod: info.ModTime(), name: name, detail: detail}
+	artifactSummaries.mu.Unlock()
+	return name, detail
 }
 
 // summarizeArtifact reads the display name and a one-line detail for a list.
@@ -519,11 +625,11 @@ func loadArtifact(kind artifactKind, id string) (string, error) {
 		return "", err
 	}
 	data, err := readLimited(path, maxArtifactBytes)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) {
 		return "", fmt.Errorf("找不到%s：%s", kind.label, id)
 	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%s读取失败：%w", kind.label, publicError(err))
 	}
 	return string(data), nil
 }
@@ -542,8 +648,14 @@ func saveArtifact(kind artifactKind, id string, raw string) (string, error) {
 		if json.Unmarshal(clean, &probe) == nil && idPattern.MatchString(probe.ID) {
 			finalID = probe.ID
 		} else {
-			finalID = generatedID(kind.label)
+			finalID, err = generatedID(kind.label)
+			if err != nil {
+				return "", err
+			}
 		}
+	}
+	if err := checkArtifactIdentity(kind, clean, finalID); err != nil {
+		return "", err
 	}
 	path, err := artifactPath(kind, finalID)
 	if err != nil {
@@ -555,11 +667,37 @@ func saveArtifact(kind artifactKind, id string, raw string) (string, error) {
 	return finalID, nil
 }
 
+// checkArtifactIdentity keeps a stored file and the id inside it in step. The
+// page round-trips a world's id, so a mismatch means two files would claim the
+// same world; imported world books keep their own keys instead.
+func checkArtifactIdentity(kind artifactKind, clean []byte, id string) error {
+	if kind != worldKind {
+		return nil
+	}
+	var probe struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(clean, &probe) != nil {
+		return nil
+	}
+	inner := strings.TrimSpace(probe.ID)
+	if inner == "" || !idPattern.MatchString(inner) || inner == id {
+		return nil
+	}
+	return fmt.Errorf("世界标识不一致：内容里是 %s，保存目标是 %s", inner, id)
+}
+
 // deleteArtifact moves one stored file to the app's Trash folder.
 func deleteArtifact(kind artifactKind, id string) error {
 	path, err := artifactPath(kind, id)
 	if err != nil {
 		return err
 	}
-	return moveToTrash(path)
+	if err := moveToTrash(path); err != nil {
+		if errors.Is(err, errNotExist) {
+			return fmt.Errorf("找不到%s：%s", kind.label, id)
+		}
+		return publicError(err)
+	}
+	return nil
 }

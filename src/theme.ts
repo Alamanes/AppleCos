@@ -119,7 +119,8 @@ export function systemPalette(): Palette {
 
 export function normalizeChoice(value: string | null | undefined): ThemeChoice {
   if (!value) return "system";
-  if (value in LEGACY) return LEGACY[value] ?? "system";
+  // Own keys only: "constructor" must not resolve to a prototype member.
+  if (Object.hasOwn(LEGACY, value)) return LEGACY[value] ?? "system";
   if (PALETTES.has(value)) return value as Palette;
   return "system";
 }
@@ -154,7 +155,13 @@ let shellBridge: Promise<{ setWindowBackground?: (color: string) => Promise<void
  * the default background. Shell only exists once the Go side ships it, so a
  * missing binding is not an error.
  */
+/** Colours the host accepts; anything else is skipped rather than sent. */
+function isColorValue(color: string): boolean {
+  return /^#[0-9a-f]{3,8}$/i.test(color.trim()) || color.startsWith("light-dark(");
+}
+
 function syncWindowBackground(color: string): void {
+  if (!isColorValue(color)) return;
   if (!shellBridge) {
     shellBridge = import("./mygo")
       .then((mod) => (mod as unknown as { Shell?: { setWindowBackground?: (c: string) => Promise<void> } }).Shell ?? null)

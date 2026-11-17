@@ -429,10 +429,14 @@ export interface TurnSnapshot {
   turn: number;
   createdAt: number;
   summary: string;
-  /** Ids of the messages that exist at this turn. */
+  /** Ids of the messages that exist at this turn; empty on slimmed saves. */
   messageIds: string[];
+  /** Number of messages at this turn, used when messageIds were slimmed away. */
+  messageCount?: number;
   scene: SceneState;
   memory: MemoryState;
+  /** Character state at this turn; older saves simply lack it. */
+  overlays?: Record<string, CharacterOverlay>;
   lore: LoreRuntimeState;
   loreLog: LoreActivationLog;
 }

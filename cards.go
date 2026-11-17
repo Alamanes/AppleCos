@@ -38,6 +38,11 @@ func normalizeCard(data []byte, source string) ([]byte, CardSummary, error) {
 	if err != nil {
 		return nil, CardSummary{}, err
 	}
+	// A PNG or CHARX card can carry far more than a JSON card; refuse it before
+	// the object graph and the pretty-printed copy both sit in memory.
+	if len(payload) > maxImportBytes {
+		return nil, CardSummary{}, fmt.Errorf("角色卡数据过大：%d 字节，上限 %d", len(payload), maxImportBytes)
+	}
 	if source == "" {
 		source = kind
 	}
@@ -52,6 +57,11 @@ func normalizeCard(data []byte, source string) ([]byte, CardSummary, error) {
 	out, err := json.MarshalIndent(normalized, "", "  ")
 	if err != nil {
 		return nil, CardSummary{}, err
+	}
+	// The library reads cards back with the same cap; a bigger card would be
+	// stored but never listed or opened again.
+	if len(out) > maxArtifactBytes {
+		return nil, CardSummary{}, fmt.Errorf("角色卡数据过大：%d 字节，上限 %d", len(out), maxArtifactBytes)
 	}
 	summary := CardSummary{
 		Spec:        "chara_card_v3",
@@ -186,6 +196,10 @@ func decodeBase64Text(raw []byte) ([]byte, error) {
 	}, string(raw))
 	if text == "" {
 		return nil, errors.New("角色卡数据是空的")
+	}
+	// Refuse an oversized payload before the decoder allocates its output.
+	if int64(len(text)) > int64(maxImportBytes)/3*4+4 {
+		return nil, errors.New("角色卡数据过大")
 	}
 	encodings := []*base64.Encoding{
 		base64.StdEncoding, base64.RawStdEncoding,

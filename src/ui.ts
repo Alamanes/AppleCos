@@ -29,12 +29,19 @@ export interface ToolHandle {
   element: HTMLElement;
 }
 
+/** How a confirmation card ended; "expired" is set by the queue's timeout. */
+export type ConfirmState = "approved" | "denied" | "expired";
+
 export interface ConfirmOptions {
   title: string;
   body?: string;
   approveLabel?: string;
   denyLabel?: string;
   name?: string;
+  /** Consent request this card answers, so a later request cannot inherit it. */
+  requestId?: string;
+  /** Queue timeout in ms; the card closes itself once it elapses. */
+  timeoutMs?: number;
   approve: () => void;
   deny?: () => void;
 }
@@ -58,10 +65,22 @@ export class ChatView {
   private preview: PreviewLine | null = null;
   /** Follow new output only while the reader is at the bottom of the script. */
   private stick = true;
+  /** Cards still waiting for an answer, keyed by consent request id. */
+  private readonly confirms = new Map<string, { finish: (state: ConfirmState) => void }>();
+  /** Hidden live region: one finished block at a time, never a stream of tokens. */
+  private readonly announcer: HTMLElement | null;
+  /** A rebuild replays whole turns, which must not be spoken line by line. */
+  private replaying = false;
 
   constructor(root: HTMLElement) {
     this.root = root;
     this.empty = document.querySelector<HTMLElement>("#empty");
+    // Streaming rewrites text every token, so the script stays silent to
+    // assistive tech and the announcer speaks finished blocks only.
+    this.root.setAttribute("role", "log");
+    this.root.setAttribute("aria-live", "off");
+    this.root.setAttribute("aria-relevant", "additions");
+    this.announcer = ensureAnnouncer();
     this.root.addEventListener(
       "scroll",
       () => {
@@ -81,6 +100,13 @@ export class ChatView {
   /** A scene direction, not dialogue. */
   narrate(text: string): void {
     this.say("narrator", text);
+  }
+
+  /** Speaks one finished piece of the script, or nothing while replaying. */
+  private announce(text: string): void {
+    if (this.replaying || !this.announcer) return;
+    const value = text.trim();
+    if (value !== "") this.announcer.textContent = value;
   }
 
   /** A line from the operator, rendered apart from the character's voice. */
@@ -119,6 +145,7 @@ export class ChatView {
     if (who && line.who) line.who.textContent = who;
     this.current = null;
     this.scroll();
+    this.announce(text);
   }
 
   /** Opens one structured reply; its blocks arrive through appendBlocks. */
@@ -138,7 +165,11 @@ export class ChatView {
     this.clearPreview();
     if (blocks.length === 0) return;
     this.setEmpty(false);
+    const spoken: string[] = [];
     for (const block of blocks) {
+      if (block.text.trim() !== "") {
+        spoken.push(block.kind === "narration" || !block.speaker ? block.text : block.speaker + "：" + block.text);
+      }
       if (block.kind === "narration") {
         this.group = null;
         this.appendNarration(block.text);
@@ -147,6 +178,7 @@ export class ChatView {
       this.appendVoice(block.kind, block.speaker ?? "", block.text);
     }
     this.scroll();
+    this.announce(spoken.join("\n"));
   }
 
   /** Closes the running structured reply. */
@@ -188,6 +220,7 @@ export class ChatView {
     this.group = null;
     this.clearPreview();
     this.say("error", text);
+    this.announce(text);
   }
 
   /**
@@ -271,18 +304,30 @@ export class ChatView {
           resultRow.hidden = result.length === 0;
         }
         this.scroll();
+        // A screen reader hears the outcome, not every inner update.
+        this.announce(label.textContent + " · " + statusLabel(next));
       },
     };
     return handle;
   }
 
-  /** A tool that needs a decision before it runs. */
+  /**
+   * A tool that needs a decision before it runs. The card answers exactly one
+   * request: with an id it can be closed from the queue side, so a stale card
+   * never approves a later request.
+   */
   confirm(options: ConfirmOptions): HTMLElement {
     this.setEmpty(false);
+    // The queue presents one request at a time, so a new card means every
+    // earlier one was already answered or timed out: close them, never leave a
+    // stale button that would answer the new request.
+    for (const entry of [...this.confirms.values()]) entry.finish("expired");
+    this.confirms.clear();
 
     const card = document.createElement("div");
     card.className = "confirm-card";
     card.setAttribute("role", "group");
+    if (options.requestId) card.dataset.request = options.requestId;
 
     const head = document.createElement("p");
     head.className = "confirm-head";
@@ -310,22 +355,44 @@ export class ChatView {
     deny.className = "deny";
     deny.textContent = options.denyLabel ?? "拒绝";
 
-    const settle = (state: "approved" | "denied"): void => {
+    const requestId = options.requestId;
+    let settled = false;
+    let timer: number | undefined;
+
+    const finish = (state: ConfirmState): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (requestId) this.confirms.delete(requestId);
       card.dataset.state = state;
       actions.remove();
+      if (state === "expired") {
+        const note = document.createElement("p");
+        note.className = "confirm-note";
+        note.textContent = "已超时，这次请求作废；需要时让模型再发起一次。";
+        card.append(note);
+        return;
+      }
       document.dispatchEvent(
         new CustomEvent(state === "approved" ? "applecos:tool-approve" : "applecos:tool-deny", {
-          detail: { name: options.name ?? options.title },
+          detail: {
+            name: options.name ?? options.title,
+            id: requestId ?? "",
+            requestId: requestId ?? "",
+            state,
+          },
         }),
       );
     };
 
     approve.addEventListener("click", () => {
-      settle("approved");
+      if (settled) return;
+      finish("approved");
       options.approve();
     });
     deny.addEventListener("click", () => {
-      settle("denied");
+      if (settled) return;
+      finish("denied");
       options.deny?.();
     });
 
@@ -333,12 +400,33 @@ export class ChatView {
     card.append(actions);
     this.root.append(card);
     this.scroll();
+
+    if (requestId) {
+      this.confirms.set(requestId, { finish });
+      if (options.timeoutMs && options.timeoutMs > 0) {
+        timer = window.setTimeout(() => finish("expired"), options.timeoutMs);
+      }
+    }
     return card;
+  }
+
+  /**
+   * Closes a pending card from the queue side: answered elsewhere, cancelled or
+   * timed out. Returns false when that card already ended on its own.
+   */
+  resolveConfirm(requestId: string, state: ConfirmState = "expired"): boolean {
+    const entry = this.confirms.get(requestId);
+    if (!entry) return false;
+    entry.finish(state);
+    return true;
   }
 
   /** Replays stored messages into a fresh transcript. */
   render(messages: unknown[]): void {
     this.clear();
+    // A rebuild must not read the whole history aloud.
+    this.replaying = true;
+    const cards = new Map<string, ToolHandle>();
 
     for (const raw of messages) {
       const message = raw as {
@@ -348,6 +436,7 @@ export class ChatView {
         speaker?: string;
         name?: string;
         toolName?: string;
+        toolCallId?: string;
         isError?: boolean;
       };
       const role = message.role ?? "assistant";
@@ -366,20 +455,40 @@ export class ChatView {
         this.replayAssistant(text);
         if (!blocks) continue;
         for (const block of blocks) {
-          const candidate = block as { type?: string; name?: string; arguments?: unknown; text?: string };
+          const candidate = block as {
+            type?: string;
+            name?: string;
+            arguments?: unknown;
+            text?: string;
+            id?: string;
+            toolCallId?: string;
+          };
           if (candidate.type !== "toolCall" || !candidate.name) continue;
           const args =
             typeof candidate.arguments === "string"
               ? candidate.arguments
               : JSON.stringify(candidate.arguments ?? {}, null, 2);
-          this.tool(candidate.name, args, "done");
+          const handle = this.tool(candidate.name, args, "done");
+          const id = candidate.id ?? candidate.toolCallId;
+          if (id) cards.set(id, handle);
         }
         continue;
       }
 
       if (role === "toolResult" || role === "tool") {
+        const text = messageText(message);
+        // One call, one bubble: the result lands inside the card it answers.
+        const id = message.toolCallId;
+        const open = id ? cards.get(id) : undefined;
+        if (id && open) {
+          cards.delete(id);
+          open.update(message.isError ? "error" : "done", text);
+          continue;
+        }
+        // A result whose call is gone (a rewound turn) is one plain notice.
         const label = message.toolName ?? message.name ?? "工具";
-        this.tool(label, messageText(message), message.isError ? "error" : "done");
+        const line = oneLine(text, 80);
+        this.say("notice", line === "" ? label : label + " · " + line);
         continue;
       }
 
@@ -393,10 +502,14 @@ export class ChatView {
 
     this.setEmpty(messages.length === 0);
     this.scroll(true);
+    this.replaying = false;
   }
 
   clear(): void {
     this.clearPreview();
+    // Cards belong to the script that is going away; nothing stays clickable.
+    for (const entry of [...this.confirms.values()]) entry.finish("expired");
+    this.confirms.clear();
     this.root.replaceChildren();
     this.current = null;
     this.currentText = "";
@@ -425,7 +538,10 @@ export class ChatView {
 
   /** The opening card steps aside once the script starts. */
   private setEmpty(visible: boolean): void {
-    if (this.empty) this.empty.dataset.visible = visible ? "true" : "false";
+    if (!this.empty) return;
+    this.empty.dataset.visible = visible ? "true" : "false";
+    // The only "press Enter to start" hint must be readable as well as visible.
+    this.empty.setAttribute("aria-hidden", visible ? "false" : "true");
   }
 
   /** Replays one assistant turn: structured blocks, or plain narration. */
@@ -445,6 +561,8 @@ export class ChatView {
     this.setEmpty(false);
     const article = document.createElement("article");
     article.className = `line ${kind} preview`;
+    // The temp block rewrites itself per token; it must stay unspoken.
+    article.setAttribute("aria-hidden", "true");
     const speech = document.createElement("p");
     speech.className = "speech streaming";
     article.append(speech);
@@ -533,6 +651,27 @@ export class ChatView {
     this.root.append(article);
     return { root: article, speech, who: whoElement };
   }
+}
+
+const ANNOUNCER_ID = "sr-announcer";
+
+/** Hidden polite live region; created on demand when the page has none. */
+function ensureAnnouncer(): HTMLElement | null {
+  const existing = document.getElementById(ANNOUNCER_ID);
+  if (existing) {
+    existing.setAttribute("aria-live", "polite");
+    existing.setAttribute("aria-atomic", "true");
+    return existing;
+  }
+  const host = document.body ?? document.documentElement;
+  if (!host) return null;
+  const node = document.createElement("p");
+  node.id = ANNOUNCER_ID;
+  node.className = "sr-only";
+  node.setAttribute("aria-live", "polite");
+  node.setAttribute("aria-atomic", "true");
+  host.append(node);
+  return node;
 }
 
 function statusLabel(state: ToolState): string {
