@@ -74,7 +74,16 @@
         <!-- Streaming rewrites text per token, so the live region is the announcer. -->
         <div id="chat" class="script" role="log" aria-live="off" aria-relevant="additions"></div>
 
+
         <form id="composer" class="composer">
+          <!-- The player's character is not a card, so its death locks the scene. -->
+          <div id="player-death" class="player-death" role="status" hidden>
+            <div class="player-death-text">
+              <p class="player-death-title">你的角色已经退场</p>
+              <p class="player-death-cause" id="player-death-cause"></p>
+            </div>
+            <button type="button" class="ghost" id="player-death-new">建立新角色</button>
+          </div>
           <div class="box">
             <textarea
               id="input"

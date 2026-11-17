@@ -477,6 +477,42 @@ body {
 
 /* ---------- Composer ---------- */
 
+/* The player's character died; a new one must be written before play resumes. */
+.player-death {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: 760px;
+  margin: 0 auto 10px;
+  padding: 11px 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, var(--line));
+  border-radius: var(--radius-m, 12px);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
+}
+
+.player-death[hidden] {
+  display: none;
+}
+
+.player-death-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.player-death-title {
+  margin: 0;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.player-death-cause {
+  margin: 3px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .composer {
   grid-row: 4;
   min-width: 0;

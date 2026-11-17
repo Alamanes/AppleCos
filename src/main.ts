@@ -123,6 +123,8 @@ const input = $<HTMLTextAreaElement>("#input");
 const sendButton = $<HTMLButtonElement>("#send");
 const railToggle = $<HTMLButtonElement>("#toggle-rail");
 const statusElement = $<HTMLElement>("#status");
+const deathBanner = $<HTMLElement>("#player-death");
+const deathCause = $<HTMLElement>("#player-death-cause");
 
 let store: WorldStore;
 let config: Config;
@@ -1390,6 +1392,7 @@ function pushWorldState(): void {
   document.dispatchEvent(
     new CustomEvent<WorldState & { activeWorldId: string }>("applecos:world", { detail: state }),
   );
+  syncPlayerDeath();
 }
 
 function setClock(minutes: number, phase?: string): void {
@@ -1583,6 +1586,9 @@ function addCastMember(cardId: string): void {
 /** Archive block heading, also used to keep re-archiving idempotent. */
 const IDENTITY_ARCHIVE_HEAD = "【前玩家身份档案】";
 
+/** Same marker slay_character writes; a dead identity retires as dead. */
+const DECEASED_TAG = "已故";
+
 /** Keeps what the cast felt about the retired identity on its card. */
 function identityArchive(old: PlayerIdentity): string {
   const lines: string[] = ["前玩家身份：" + (old.name.trim() || "旧身份")];
@@ -1624,22 +1630,26 @@ function withIdentityArchive(description: string, archive: string): string {
  * while the new player starts from an empty world table.
  */
 async function retirePlayerIdentity(old: PlayerIdentity): Promise<void> {
+  const death = session.playerDeath;
   const archive = identityArchive(old);
   const oldName = old.name.trim() || "旧身份";
+  // A character that died on stage retires as a corpse: no cast slot, no prompt.
+  const died = death !== undefined && (death.name.trim() === "" || death.name.trim() === oldName);
   const existing = Object.values(world.cards).find((card) => card.name.trim() === oldName);
   const cardId = existing?.id ?? createId("card");
   const payload = existing
     ? patchCardPayload(existing.raw, {
         description: withIdentityArchive(existing.description, archive),
+        ...(died ? { tags: [...new Set([...existing.tags, "前玩家身份", DECEASED_TAG])] } : {}),
       })
     : newCardPayload({
         name: oldName,
         description: withIdentityArchive("", archive),
-        scenario: "前玩家身份，如今作为独立角色留在世界上。",
-        tags: ["前玩家身份"],
+        scenario: died ? "前玩家身份，已在剧情中死去。" : "前玩家身份，如今作为独立角色留在世界上。",
+        tags: died ? ["前玩家身份", DECEASED_TAG] : ["前玩家身份"],
       });
   await saveWorldCard(world, cardId, payload);
-  addCastMember(cardId);
+  if (!died) addCastMember(cardId);
   // The new player owns an empty table; nothing carries over by accident.
   world.relations = {};
   for (const overlay of Object.values(session.overlays)) {
@@ -1648,6 +1658,23 @@ async function retirePlayerIdentity(old: PlayerIdentity): Promise<void> {
     overlay.notes = [];
     overlay.relationship = "";
     overlay.updatedAt = Date.now();
+  }
+  if (died && death) {
+    const overlay = session.overlays[cardId] ?? {
+      cardId,
+      affinity: 0,
+      tags: [],
+      notes: [],
+      relationship: "",
+      updatedAt: Date.now(),
+    };
+    overlay.deceased = true;
+    overlay.deathCause = death.cause.trim() || "没有写明";
+    overlay.diedAtTurn = death.turn;
+    overlay.updatedAt = Date.now();
+    session.overlays[cardId] = overlay;
+    session.meta.cast = session.meta.cast.filter((id) => id !== cardId);
+    runtime.present = runtime.present.filter((id) => id !== cardId);
   }
 }
 
@@ -1664,7 +1691,17 @@ async function applyPlayerEdit(): Promise<void> {
   world.player = next;
   session.player = { ...next };
   session.meta.playerName = next.name;
-  if (changed) await retirePlayerIdentity(previous);
+  if (changed) {
+    await retirePlayerIdentity(previous);
+    // A written character ends the death lock; the old one is now a real card.
+    delete session.playerDeath;
+  } else if (
+    session.playerDeath !== undefined &&
+    (previous.description !== next.description || previous.persona !== next.persona)
+  ) {
+    // Same name, rewritten person: unlock, but mint no card that would collide.
+    delete session.playerDeath;
+  }
   await saveWorldNow();
   await saveStateNow();
   pushWorldState();
@@ -1991,7 +2028,32 @@ function syncConsent(): void {
    UI
    ------------------------------------------------------------------------- */
 
+/**
+ * Locks the composer while the player has no character: the death of their own
+ * identity cannot be undone by a card, so nothing may be sent until a new one
+ * is written.
+ */
+function syncPlayerDeath(): void {
+  const death = session.playerDeath;
+  const locked = death !== undefined;
+  deathBanner.hidden = !locked;
+  input.disabled = locked;
+  input.placeholder = locked ? "角色已退场，建立新角色后才能继续" : "写一句台词";
+  if (death) {
+    const name = death.name.trim();
+    const cause = death.cause.trim();
+    deathCause.textContent = (name === "" ? "你扮演的角色" : "「" + name + "」") + (cause === "" ? "已经退场。" : "已经退场：" + cause);
+  }
+  syncSend();
+}
+
 function syncSend(): void {
+  if (session.playerDeath) {
+    sendButton.dataset.mode = "idle";
+    sendButton.disabled = true;
+    sendButton.setAttribute("aria-label", "角色已退场");
+    return;
+  }
   if (running) {
     sendButton.dataset.mode = "busy";
     sendButton.disabled = false;
@@ -2031,6 +2093,12 @@ async function halt(): Promise<void> {
 
 async function send(): Promise<void> {
   if (!ready) return;
+  if (session.playerDeath) {
+    // Guarded as well as disabled: a queued Enter must not slip past the lock.
+    syncPlayerDeath();
+    view.error("你的角色已经退场，先建立一名新角色。");
+    return;
+  }
   const text = input.value.trim();
   if (!text) return;
   if (text === "/神谕" || text.startsWith("/神谕 ")) {
@@ -2099,6 +2167,10 @@ function bindUi(): void {
   });
   railToggle.addEventListener("click", () => setRail(app.dataset.rail === "closed"));
   $("#open-settings").addEventListener("click", () => void openSettings());
+  // The player card lives in the world file; the rail button is its entry.
+  $("#player-death-new").addEventListener("click", () => {
+    document.querySelector<HTMLButtonElement>("#rail-open-player")?.click();
+  });
 }
 
 /** Settles the story before the window goes away; runs at most once. */

@@ -1011,7 +1011,7 @@ function verdictPhrase(check: CheckResult): string {
 /** One sentence with the whole outcome, plus the cost the model must write out. */
 function describeCheck(check: CheckResult, stakes: string): string {
   let line = "判定 1d100：掷出 " + check.roll + "，成功率 " + check.chance + "%，" + verdictPhrase(check) + "。";
-  if (check.verdict === "fatal") line += "致命：该角色应当退场，用 slay_character 让他离开舞台。";
+  if (check.verdict === "fatal") line += "致命：该角色应当退场，用 slay_character 让他离开舞台（玩家角色同样如此，按玩家名登记）。";
   if (stakes !== "") line += "代价：" + stakes + "。";
   return line;
 }
@@ -1038,7 +1038,7 @@ const rollParams = obj({
   lethal: opt(
     bool({
       description:
-        "这次判定是否可能致命。为真且判定失败时，结果升级为致命失败，回执会要求用 slay_character 让该角色退场；神力干预下仍为大成功。",
+        "这次判定是否可能致命。为真且判定失败时，结果升级为致命失败，回执会要求用 slay_character 让该角色退场，玩家角色同样如此；神力干预下仍为大成功。",
     }),
   ),
   expression: opt(
@@ -1686,7 +1686,7 @@ function reviseCharacterTool(ctx: ToolContext): AgentTool<any> {
 const DECEASED_TAG = "已故";
 
 const slayCharacterParams = obj({
-  nameOrId: str({ minLength: 1, maxLength: 200, description: "按角色名或卡片 id 定位要退场的角色。" }),
+  nameOrId: str({ minLength: 1, maxLength: 200, description: "按角色名或卡片 id 定位要退场的角色；玩家扮演的角色按玩家名登记。" }),
   cause: str({ minLength: 1, maxLength: 200, description: "死因，一句话写清他是怎么死的。" }),
   note: opt(str({ maxLength: 200, description: "留给他人的余波：谁在场、留下了什么、之后怎么处理。" })),
 });
@@ -1697,13 +1697,60 @@ interface SlayCharacterArgs {
   note?: string;
 }
 
+/**
+ * The player is never a card, so their name has to be matched by hand: exact
+ * first, then containment in either direction. Single characters are ignored,
+ * because a one-letter name appears inside half the cast.
+ */
+function sameNameAsPlayer(playerName: string, spoken: string): boolean {
+  const name = playerName.trim().toLowerCase();
+  const needle = spoken.trim().toLowerCase();
+  if (name === "" || needle === "") return false;
+  if (name === needle) return true;
+  if (name.length < 2 || needle.length < 2) return false;
+  return name.includes(needle) || needle.includes(name);
+}
+
+/**
+ * Retires the player's own character. It cannot leave the cast, so the scene is
+ * locked instead: the prompt stops carrying the identity and the composer waits
+ * for a new one.
+ */
+function slayPlayer(
+  ctx: ToolContext,
+  name: string,
+  cause: string,
+  turn: number,
+  now: number,
+): AgentToolResult {
+  const death = ctx.session.playerDeath;
+  if (death) {
+    return result(
+      "本场玩家角色「" + death.name + "」已经退场，死亡记录不会再写一遍。只有建立一名新角色，这场戏才能继续。",
+      { player: death.name, deceased: true, repeat: true },
+    );
+  }
+  ctx.session.playerDeath = { name, cause, turn, at: now };
+  ctx.log({
+    at: now,
+    kind: "card.revise",
+    tool: "slay_character",
+    payload: { worldId: ctx.worldId, player: name, cause, turn },
+  });
+  return result(
+    "玩家角色「" + name + "」已退场（死因：" + cause + "）。他不再出场、不再说话，提示词里也不再出现这名角色；" +
+      "这场戏由他扮演的部分到此结束，玩家必须建立一名新角色才能继续。",
+    { player: name, deceased: true },
+  );
+}
+
 /** Death is final: the cast loses the id, the overlay keeps the record, the card keeps a tag. */
 function slayCharacterTool(ctx: ToolContext): AgentTool<any> {
   return {
     name: "slay_character",
     label: "陨落",
     description:
-      "角色真的死了就用它完成退场登记：从在场名单移除、留下死亡记录、给角色卡打上「已故」。只在致命判定失败、或剧情里不可逆的致命结果已经发生之后调用，不要用它制造戏剧性。",
+      "角色真的死了就用它完成退场登记：从在场名单移除、留下死亡记录、给角色卡打上「已故」。玩家扮演的角色同样适用，按玩家名登记，他退场后本场由新角色接手。致命判定失败、濒死且无人施救、或剧情里已经发生不可逆的致死结果时立即调用；不要用它制造戏剧性。",
     parameters: slayCharacterParams,
     executionMode: "sequential",
     async execute(_toolCallId, rawParams) {
@@ -1711,9 +1758,15 @@ function slayCharacterTool(ctx: ToolContext): AgentTool<any> {
       if (!spendAuthoring(ctx)) return failure(AUTHORING_LIMIT_MESSAGE, { reason: "authoring-limit" });
       const now = ctx.now();
       const spoken = clip(args.nameOrId, 80);
+      const cause = clip(args.cause, 200) || "没有写明";
+      const turn = Math.trunc(ctx.session.meta.turn);
       const cardId = resolveCardId(ctx.world, spoken);
       const card = cardId ? ctx.world.cards[cardId] : undefined;
       if (!cardId || !card) {
+        // The player's character is not registered as a card; it retires itself.
+        if (sameNameAsPlayer(ctx.session.player.name, spoken)) {
+          return slayPlayer(ctx, ctx.session.player.name.trim(), cause, turn, now);
+        }
         const names = cardList(ctx.world).map((item) => item.name).slice(0, 12);
         return failure("没有这个角色：" + spoken + "。可选：" + (names.length > 0 ? names.join("、") : "还没有角色卡"), {
           reason: "unknown-character",
@@ -1730,9 +1783,7 @@ function slayCharacterTool(ctx: ToolContext): AgentTool<any> {
         );
       }
 
-      const cause = clip(args.cause, 200) || "没有写明";
       const note = clip(args.note ?? "", 200);
-      const turn = Math.trunc(ctx.session.meta.turn);
       const tags = card.tags.includes(DECEASED_TAG) ? card.tags.slice() : [...card.tags, DECEASED_TAG];
       let saved: CharacterCard;
       try {

@@ -16,6 +16,7 @@ import {
   type LoreRuntimeState,
   type MemoryFact,
   type MemoryState,
+  type PlayerDeath,
   type PlayerIdentity,
   type SceneState,
   type SessionMeta,
@@ -361,8 +362,9 @@ function truncateToTurn(session: SessionState, turn: number, now: number): Sessi
 /** Rewinds to the end of a given turn. Pure: the input session is untouched. */
 export function rewindSession(session: SessionState, turn: number, now = Date.now()): SessionState {
   const snapshot = session.turns.find((item) => item.turn === turn);
-  if (snapshot) return fromSnapshot(session, snapshot, now);
-  return truncateToTurn(session, turn, now);
+  const next = snapshot ? fromSnapshot(session, snapshot, now) : truncateToTurn(session, turn, now);
+  // Rewinding undoes the death along with the turn that caused it.
+  return { ...next, playerDeath: undefined };
 }
 
 /** Counters for the session list and the header. */
@@ -560,6 +562,19 @@ function normalizeSnapshot(raw: unknown): TurnSnapshot | null {
   };
 }
 
+/** A stored player death, or undefined when the scene still has its character. */
+function readPlayerDeath(raw: unknown): PlayerDeath | undefined {
+  const record = asDict(raw);
+  const name = textOf(record.name);
+  if (name === "") return undefined;
+  return {
+    name,
+    cause: textOf(record.cause),
+    turn: Math.trunc(numOf(record.turn, 0)),
+    at: numOf(record.at, Date.now()),
+  };
+}
+
 /** Rebuilds a full session from stored JSON, tolerant of older shapes. */
 export function restoreSession(raw: unknown, world: World): SessionState {
   const record = asDict(raw);
@@ -603,6 +618,7 @@ export function restoreSession(raw: unknown, world: World): SessionState {
 
   return {
     version: SESSION_VERSION,
+    playerDeath: readPlayerDeath(record.playerDeath),
     meta: {
       id: textOf(metaRaw.id) || createId("session"),
       worldId: textOf(metaRaw.worldId) || world.id,

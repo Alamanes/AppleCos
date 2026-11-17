@@ -26,6 +26,17 @@ export interface PlayerIdentity {
   persona: string;
 }
 
+/**
+ * The player's own character left the story. It is not a card, so it cannot be
+ * retired like one; this record locks the scene until a new character is written.
+ */
+export interface PlayerDeath {
+  name: string;
+  cause: string;
+  turn: number;
+  at: number;
+}
+
 /** Name used while a world or session carries no player identity yet. */
 export const DEFAULT_PLAYER_NAME = "玩家";
 
@@ -446,6 +457,8 @@ export interface SessionState {
   version: number;
   meta: SessionMeta;
   player: PlayerIdentity;
+  /** Present once the player's character died; cleared by writing a new one. */
+  playerDeath?: PlayerDeath;
   messages: WorldMessage[];
   memory: MemoryState;
   /** Per-character mutable state, keyed by card id. */
