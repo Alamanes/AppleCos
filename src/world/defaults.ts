@@ -3,7 +3,6 @@
 import { normalizeCard, normalizeLoreEntry } from "./card";
 import type { CharacterCard, Lorebook, PlayerIdentity, World } from "./types";
 
-const NARRATOR_ID = "card-narrator";
 const COMPANION_ID = "card-companion";
 
 interface CardSeed {
@@ -36,11 +35,11 @@ function buildCard(id: string, seed: CardSeed): CharacterCard {
   return normalizeCard(raw, { id, bookId: id + "_book" });
 }
 
-const PLAYER: PlayerIdentity = {
-  name: "旅人",
-  description: "从别处来到这个镇子的人，随身只带着一件行李。",
-  persona: "玩家只有一个人，说的话、做的选择与心里想的事都由用户决定；叙事只写这些选择的后果。",
-};
+/**
+ * No player is handed out by default: an unwritten identity stays empty, so the
+ * narrator never inherits a character the user did not create.
+ */
+const EMPTY_PLAYER: PlayerIdentity = { name: "", description: "", persona: "" };
 
 const SETTING = [
   "这是一个示例世界，用来演示世界设定、角色卡、世界书与记忆的工作方式。可以直接在这里开演，也可以把它改成自己的设定。",
@@ -54,17 +53,6 @@ const RULES = [
   "角色知道的事有限，只写他们能看见、听到、猜到的部分。",
   "每轮推进一小段，把选择留给玩家。",
 ].join("\n");
-
-const NARRATOR_SEED: CardSeed = {
-  name: "世界意志",
-  description:
-    "你是这场戏的世界意志，也就是旁白。你写出场景、天气与发生的事，也代演在场的每一位角色。\n" +
-    "你不属于任何阵营，不为玩家作弊，也不故意为难玩家。你只让世界按它自己的规矩运转。",
-  personality: "冷静、克制，不评价玩家。",
-  scenario: "示例世界，傍晚。",
-  firstMessage: "",
-  tags: ["旁白"],
-};
 
 const COMPANION_SEED: CardSeed = {
   name: "驿站管理员",
@@ -95,19 +83,20 @@ const LORE_SEEDS = [
   },
 ];
 
-/** An empty world with only the narrator card, ready for the editor. */
+/**
+ * An empty world, ready for the editor. It carries no cast and no player: the
+ * user writes both. Narration comes from the system prompt, not from a card.
+ */
 export function createWorldScaffold(id: string, name: string, now = Date.now()): World {
-  const narratorId = id + "-narrator";
-  const narrator = buildCard(narratorId, NARRATOR_SEED);
   return {
     id,
     name: name.trim() || "新世界",
     summary: "",
     setting: "在这里写这个世界的时代、地点与规矩。",
     rules: RULES,
-    player: PLAYER,
-    narratorId,
-    cards: { [narrator.id]: narrator },
+    player: EMPTY_PLAYER,
+    narratorId: "",
+    cards: {},
     lorebook: {
       id: id + "-book",
       name: (name.trim() || "新世界") + "的世界书",
@@ -121,9 +110,8 @@ export function createWorldScaffold(id: string, name: string, now = Date.now()):
   };
 }
 
-/** A ready-to-play world with a narrator card, one companion and a small book. */
+/** A ready-to-play world with one companion card and a small book. */
 export function defaultWorld(now = Date.now()): World {
-  const narrator = buildCard(NARRATOR_ID, NARRATOR_SEED);
   const companion = buildCard(COMPANION_ID, COMPANION_SEED);
   const entries = LORE_SEEDS.map((seed) =>
     normalizeLoreEntry(
@@ -152,9 +140,9 @@ export function defaultWorld(now = Date.now()): World {
     summary: "一个用于试玩的起始世界，可以把设定换成自己的。",
     setting: SETTING,
     rules: RULES,
-    player: PLAYER,
-    narratorId: NARRATOR_ID,
-    cards: { [narrator.id]: narrator, [companion.id]: companion },
+    player: EMPTY_PLAYER,
+    narratorId: "",
+    cards: { [companion.id]: companion },
     lorebook,
     createdAt: now,
     updatedAt: now,

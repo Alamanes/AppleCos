@@ -4,6 +4,7 @@
 import {
   createId,
   DEFAULT_LORE_BUDGET_CHARS,
+  DEFAULT_PLAYER_NAME,
   DEFAULT_SCAN_DEPTH,
   type CharacterCard,
   type CharacterOverlay,
@@ -225,7 +226,8 @@ export function macroContext(
 ): MacroContext {
   return {
     char: card.name,
-    user: player.name,
+    // A world without a written player still needs a name for {{user}}.
+    user: player.name.trim() || DEFAULT_PLAYER_NAME,
     persona: player.persona,
     description: card.description,
     personality: card.personality,
